@@ -24,12 +24,12 @@ pipe=StableDiffusionRubberPipeline.from_pretrained(
 #in this example, I am using diffusion correction, SAG, inpainting and controlnet. You can uncomment to use more things and the applyance order matters
 
 # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-pipe=apply_Correction(pipe)
-pipe=apply_SAG(pipe)
-pipe=apply_inpainting(pipe)
-# pipe=apply_img2img(pipe)
-pipe=apply_controlnet(pipe)
-# pipe=apply_promptFusion(pipe)
+apply_Correction(pipe)
+apply_SAG(pipe)
+apply_inpainting(pipe)
+# apply_img2img(pipe)
+apply_controlnet(pipe)
+# apply_promptFusion(pipe)
 generator = torch.manual_seed(2733424006)
 # def printer(i, t, latents):
 #     print("bbrrrrr")

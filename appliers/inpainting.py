@@ -40,7 +40,6 @@ def apply_inpainting(pipe):
     new_function_index = pipe.denoising_step_functions.index(pipe.expand_latents)
     pipe.denoising_step_functions[new_function_index]=partial(expand_latents, pipe)
     pipe.denoising_step_functions.insert(len(pipe.denoising_step_functions) - 1, partial(num_channel4_conditional, pipe))
-    return pipe
 
 def inpainting_default(self,**kwargs):
     if kwargs.get('strength') is None:

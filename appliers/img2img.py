@@ -26,7 +26,6 @@ def apply_img2img(pipe):
     timesteps_index= pipe.denoising_functions.index(pipe.prepare_timesteps)
     pipe.prepare_timesteps=partial(prepare_timesteps, pipe)
     pipe.denoising_functions[timesteps_index]=pipe.prepare_timesteps
-    return pipe
 
 def img2img_default(self,**kwargs):
     if kwargs.get('strength') is None:

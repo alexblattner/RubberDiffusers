@@ -30,7 +30,6 @@ def apply_promptFusion(pipe):
 
     pipe.prompt_fusion_step_modifier=partial(prompt_fusion_step_modifier,pipe)
     pipe.denoising_step_functions.insert(0,pipe.prompt_fusion_step_modifier)
-    return pipe
 
 def checker(self, **kwargs):
     prompt=kwargs.get('prompt')

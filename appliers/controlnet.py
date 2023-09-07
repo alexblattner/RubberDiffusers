@@ -49,7 +49,6 @@ def apply_controlnet(pipe):
     
     new_function_index = pipe.denoising_functions.index(pipe.postProcess)
     pipe.denoising_functions.insert(new_function_index, partial(controlnet_offloading, pipe))
-    return pipe
 class BetterMultiControlnet(MultiControlNetModel):
     def add_controlnet(self, controlnet: ControlNetModel):
         """

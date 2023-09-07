@@ -15,7 +15,6 @@ from functools import partial
 def apply_Correction(pipe):
     new_function_index = pipe.denoising_step_functions.index(pipe.compute_previous_noisy_sample)
     pipe.denoising_step_functions.insert(new_function_index, partial(correction, pipe))
-    return pipe
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     """
     Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
