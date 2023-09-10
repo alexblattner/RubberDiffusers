@@ -13,24 +13,51 @@ import PIL
 import numpy as np
 from functools import partial
 def apply_promptFusion(pipe):
-    timesteps_index= pipe.denoising_functions.index(pipe.checker)
+    #replace checker with a new function that contains it
+    checker_index= pipe.denoising_functions.index(pipe.checker)
     inner_checker_promptFusion=pipe.checker
     pipe.inner_checker_promptFusion=inner_checker_promptFusion
     pipe.checker=partial(checker, pipe)
-    pipe.denoising_functions[timesteps_index]=pipe.checker
-    timesteps_index= pipe.denoising_functions.index(pipe.encode_input)
+    pipe.denoising_functions[checker_index]=pipe.checker
+    #replace encode_input with a new function that contains it
+    encode_input_index= pipe.denoising_functions.index(pipe.encode_input)
     inner_encode_input_promptFusion=pipe.encode_input
     pipe.inner_encode_input_promptFusion=inner_encode_input_promptFusion
     pipe.encode_input=partial(encode_input, pipe)
-    pipe.denoising_functions[timesteps_index]=pipe.encode_input
+    pipe.denoising_functions[encode_input_index]=pipe.encode_input
 
-    timesteps_index= pipe.denoising_functions.index(pipe.determine_batch_size)
+    #replace determine_batch_size with a new version of it
+    determine_batch_size_index= pipe.denoising_functions.index(pipe.determine_batch_size)
+    pipe.promptFusion_stored_determine_batch_size=pipe.determine_batch_size
     pipe.determine_batch_size=partial(determine_batch_size, pipe)
-    pipe.denoising_functions[timesteps_index]=pipe.determine_batch_size
+    pipe.denoising_functions[determine_batch_size_index]=pipe.determine_batch_size
 
+    #insert prompt_fusion_step_modifier at start of the denoising_step_functions
     pipe.prompt_fusion_step_modifier=partial(prompt_fusion_step_modifier,pipe)
     pipe.denoising_step_functions.insert(0,pipe.prompt_fusion_step_modifier)
+    #reverse
+    def remover_promptFusion():
+        #remove prompt_fusion_step_modifier from start of the denoising_step_functions
+        pipe.denoising_step_functions.pop(0)
+        #remove prompt_fusion_step_modifier
+        delattr(pipe, f"prompt_fusion_step_modifier")
 
+        #undo replacement of determine_batch_size with a new version of it
+        pipe.determine_batch_size=pipe.promptFusion_stored_determine_batch_size
+        pipe.denoising_functions[determine_batch_size_index]=pipe.determine_batch_size
+        delattr(pipe, f"promptFusion_stored_determine_batch_size")
+
+        #undo replacement of encode_input with a new function that contains it
+        pipe.encode_input=inner_encode_input_promptFusion
+        pipe.denoising_functions[encode_input_index]=pipe.encode_input
+        delattr(pipe, f"inner_encode_input_promptFusion")
+
+        #replace checker with a new function that contains it
+        pipe.checker=pipe.inner_checker_promptFusion
+        pipe.denoising_functions[checker_index]=pipe.checker
+        delattr(pipe, f"inner_checker_promptFusion")
+
+    pipe.revert_functions.insert(0,remover_promptFusion)
 def checker(self, **kwargs):
     prompt=kwargs.get('prompt')
     negative_prompt=kwargs.get('negative_prompt')

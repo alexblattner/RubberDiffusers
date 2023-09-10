@@ -19,36 +19,101 @@ from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.controlnet import ControlNetModel
 from functools import partial
 def apply_controlnet(pipe):
+    #add controlnet image processor
     pipe.control_image_processor = VaeImageProcessor(
         vae_scale_factor=pipe.vae_scale_factor, do_convert_rgb=True, do_normalize=False
     )
+    #insert controlnet defaults as first function
     pipe.denoising_functions.insert(0, partial(controlnet_default, pipe))
+    #insert the loadConrolnet function
     pipe.loadControlnet=partial(loadControlnet, pipe)
+    #add the prepare controlnet image from the original pipeline
     pipe.prepare_controlnet_image=partial(StableDiffusionControlNetPipeline.prepare_image, pipe)
+    #add the controlnet variable
     pipe.controlnet=None
+    #add the add controlnet function
     pipe.add_controlnet=partial(add_controlnet,pipe)
+    #add the remove controlnet function
     pipe.remove_controlnet=partial(remove_controlnet,pipe)
+    #add the controlnet_sub_check_image function
     pipe.controlnet_sub_check_image=partial(StableDiffusionControlNetPipeline.check_image,pipe)
-    new_function_index = pipe.denoising_functions.index(pipe.checker)
-    pipe.denoising_functions.insert(new_function_index, partial(controlnet_check_inputs, pipe))
-    pipe.denoising_functions.insert(new_function_index, partial(controlnet_adjustments, pipe))
+    #get checker index
+    checker_index = pipe.denoising_functions.index(pipe.checker)
+    #add 2 functions at checker_index
+    pipe.denoising_functions.insert(checker_index, partial(controlnet_check_inputs, pipe))
+    pipe.denoising_functions.insert(checker_index, partial(controlnet_adjustments, pipe))
 
-    new_function_index = pipe.denoising_functions.index(pipe.encode_input)
-    pipe.denoising_functions.insert(new_function_index, partial(controlnet_conditional_guess_adjustments, pipe))
+    #add controlnet_conditional_guess_adjustments before enncode_input function
+    encode_input_index = pipe.denoising_functions.index(pipe.encode_input)
+    pipe.denoising_functions.insert(encode_input_index, partial(controlnet_conditional_guess_adjustments, pipe))
 
-    new_function_index = pipe.denoising_functions.index(pipe.prepare_timesteps)
-    pipe.denoising_functions.insert(new_function_index, partial(controlnet_prepare_image, pipe))
+    #add controlnet_prepare_image before prepare_timesteps function
+    prepare_timesteps_index = pipe.denoising_functions.index(pipe.prepare_timesteps)
+    pipe.denoising_functions.insert(prepare_timesteps_index, partial(controlnet_prepare_image, pipe))
     
-    new_function_index = pipe.denoising_functions.index(pipe.denoiser)
-    pipe.denoising_functions.insert(new_function_index, partial(controlnet_keep_set, pipe))
+    #add controlnet_keep_set before denoiser function
+    denoiser_index = pipe.denoising_functions.index(pipe.denoiser)
+    pipe.denoising_functions.insert(denoiser_index, partial(controlnet_keep_set, pipe))
     
-    new_function_index=pipe.denoising_step_functions.index(pipe.predict_noise_residual)
+    #replace predict_noise_residual function with a new predict_noise_residual function
+    predict_noise_residual_index=pipe.denoising_step_functions.index(pipe.predict_noise_residual)
+    pipe.controlnet_stored_predict_noise_residual=pipe.predict_noise_residual
     pipe.predict_noise_residual=partial(predict_noise_residual,pipe)
-    pipe.denoising_step_functions[new_function_index]=pipe.predict_noise_residual
-    pipe.denoising_step_functions.insert(new_function_index,partial(controlnet_denoising,pipe))
+    pipe.denoising_step_functions[predict_noise_residual_index]=pipe.predict_noise_residual
+    #add controlnet_denoising before predict_noise_residual function
+    pipe.denoising_step_functions.insert(predict_noise_residual_index,partial(controlnet_denoising,pipe))
     
+    #add controlnet_offloading before postProcess
     new_function_index = pipe.denoising_functions.index(pipe.postProcess)
     pipe.denoising_functions.insert(new_function_index, partial(controlnet_offloading, pipe))
+    #reverse
+    def remover_controlnet():
+        #remove controlnet_offloading before postProcess
+        pipe.denoising_functions.pop(new_function_index)
+
+        #remove controlnet_denoising before predict_noise_residual function
+        pipe.denoising_step_functions.pop(predict_noise_residual_index)
+
+        #undo replacement of predict_noise_residual function with a new predict_noise_residual function
+        pipe.predict_noise_residual=pipe.controlnet_stored_predict_noise_residual
+        pipe.denoising_step_functions[predict_noise_residual_index]=pipe.predict_noise_residual
+        delattr(pipe, f"controlnet_stored_predict_noise_residual")
+
+        #remove controlnet_keep_set before denoiser function
+        pipe.denoising_functions.pop(denoiser_index)
+
+        #remove controlnet_prepare_image before prepare_timesteps function
+        pipe.denoising_functions.pop(prepare_timesteps_index)
+
+        #remove controlnet_conditional_guess_adjustments before enncode_input function
+        pipe.denoising_functions.pop(encode_input_index)
+
+        #remove 2 functions at checker_index
+        pipe.denoising_functions.pop(checker_index)
+        pipe.denoising_functions.pop(checker_index)
+
+        #remove controlnet_sub_check_image function
+        delattr(pipe, f"controlnet_sub_check_image")
+
+        #remove the loadConrolnet function
+        delattr(pipe, f"loadControlnet")
+        #remove the prepare controlnet image from the original pipeline
+        delattr(pipe, f"prepare_controlnet_image")
+        #remove the controlnet variable
+        delattr(pipe, f"controlnet")
+        #remove the add controlnet function
+        delattr(pipe, f"add_controlnet")
+        #remove the remove controlnet function
+        delattr(pipe, f"remove_controlnet")
+
+        #remove controlnet defaults as first function
+        pipe.denoising_functions.pop(0)
+        #add controlnet image processor
+        delattr(pipe, f"control_image_processor")
+
+    pipe.revert_functions.insert(0,remover_controlnet)
+
+
 class BetterMultiControlnet(MultiControlNetModel):
     def add_controlnet(self, controlnet: ControlNetModel):
         """
@@ -324,6 +389,8 @@ def controlnet_denoising(self, i, t, **kwargs):
     controlnet_image=kwargs.get('controlnet_image')
     cond_scale=kwargs.get('cond_scale')
     controlnet_keep=kwargs.get('controlnet_keep')
+    latent_model_input = kwargs.get('latent_model_input')
+    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
     if guess_mode and do_classifier_free_guidance:
         # Infer ControlNet only for the conditional batch.
         control_model_input = latents

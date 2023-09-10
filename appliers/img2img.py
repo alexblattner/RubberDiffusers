@@ -12,21 +12,63 @@ import PIL
 import numpy as np
 from PIL import Image
 from functools import partial
+def get_function_names(obj):
+    function_names = [name for name in dir(obj) if callable(getattr(obj, name))]
+    return function_names
 def apply_img2img(pipe):
+    #insert defaults function
     pipe.denoising_functions.insert(0, partial(img2img_default, pipe))
-    new_function_index = pipe.denoising_functions.index(pipe.checker)
-    pipe.denoising_functions.insert(new_function_index, partial(img2img_check_inputs, pipe))
+    #insert img2img_check_inputs before checker function
+    checker_index = pipe.denoising_functions.index(pipe.checker)
+    pipe.denoising_functions.insert(checker_index, partial(img2img_check_inputs, pipe))
+    #insert img2img_prepare_latents
+    pipe.img2img_prepare_latents = partial(img2img_prepare_latents, pipe)
 
-    pipe.prepare_latents = partial(prepare_latents, pipe)
-    new_function_index = pipe.denoising_functions.index(pipe.prepare_latent_var)
+    #replace prepare_latent_var
+    latent_var_index = pipe.denoising_functions.index(pipe.prepare_latent_var)
+    pipe.img2img_stored_prepare_latent_var=pipe.prepare_latent_var
     pipe.prepare_latent_var = partial(prepare_latent_var, pipe)
-    pipe.denoising_functions[new_function_index]=pipe.prepare_latent_var
-    pipe.denoising_functions.insert(new_function_index, partial(preprocess_img, pipe))
-    pipe.get_timesteps=partial(get_timesteps, pipe)
+    pipe.denoising_functions[latent_var_index]=pipe.prepare_latent_var
+    #insert img2img_preprocess_img before prepare_latent_var function
+    pipe.denoising_functions.insert(latent_var_index, partial(img2img_preprocess_img, pipe))
+
+    #insert new function
+    pipe.img2img_get_timesteps=partial(img2img_get_timesteps, pipe)
+
+    #replace prepare_timesteps
     timesteps_index= pipe.denoising_functions.index(pipe.prepare_timesteps)
+    pipe.img2img_stored_prepare_timesteps=pipe.prepare_timesteps
     pipe.prepare_timesteps=partial(prepare_timesteps, pipe)
     pipe.denoising_functions[timesteps_index]=pipe.prepare_timesteps
 
+    #reverse
+    def remover_img2img():
+        
+        #undo replacement of prepare_timesteps
+        pipe.prepare_timesteps=pipe.img2img_stored_prepare_timesteps
+        pipe.denoising_functions[timesteps_index]=pipe.prepare_timesteps
+        #remove img2img_stored_prepare_timesteps
+        delattr(pipe, f"img2img_stored_prepare_timesteps")
+        
+        #remove img2img_get_timesteps
+        delattr(pipe, f"img2img_get_timesteps")
+
+        #pop img2img_preprocess_img
+        pipe.denoising_functions.pop(latent_var_index)
+
+        #undo replacement of prepare_latent_var
+        pipe.prepare_latent_var = pipe.img2img_stored_prepare_latent_var
+        pipe.denoising_functions[latent_var_index]=pipe.prepare_latent_var
+        delattr(pipe, f"img2img_stored_prepare_latent_var")
+
+        #remove img2img_check_inputs before checker function
+        pipe.denoising_functions.pop(checker_index)
+        delattr(pipe, f"img2img_prepare_latents")
+
+        #remove defaults function
+        pipe.denoising_functions.pop(0)
+
+    pipe.revert_functions.insert(0,remover_img2img)
 def img2img_default(self,**kwargs):
     if kwargs.get('strength') is None:
         kwargs['strength']=0.75
@@ -61,11 +103,11 @@ def img2img_check_inputs(self,**kwargs):
 
     return kwargs
 
-def preprocess_img(self, **kwargs):
+def img2img_preprocess_img(self, **kwargs):
     image = self.image_processor.preprocess(kwargs.get('image'))
     kwargs['image']=image
     return kwargs
-def get_timesteps(self, num_inference_steps, strength, device):
+def img2img_get_timesteps(self, num_inference_steps, strength, device):
     # get the original timestep using init_timestep
     init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
 
@@ -78,7 +120,7 @@ def prepare_timesteps(self, **kwargs):
     num_inference_steps=kwargs.get('num_inference_steps')
     strength=kwargs.get('strength')
     device=kwargs.get('device')
-    timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
+    timesteps, num_inference_steps = self.img2img_get_timesteps(num_inference_steps, strength, device)
     latent_timestep = timesteps[:1].repeat(kwargs.get('batch_size') * kwargs.get('num_images_per_prompt'))
     kwargs['timesteps']=timesteps
     kwargs['num_inference_steps']=num_inference_steps
@@ -87,7 +129,7 @@ def prepare_timesteps(self, **kwargs):
     return kwargs
 def prepare_latent_var(self, **kwargs):
     num_channels_latents = self.unet.config.in_channels
-    latents = self.prepare_latents(
+    latents = self.img2img_prepare_latents(
         kwargs.get('image'),kwargs.get('latent_timestep'),
         kwargs.get('batch_size'), kwargs.get('num_images_per_prompt'),
         kwargs.get('dtype'),
@@ -95,7 +137,7 @@ def prepare_latent_var(self, **kwargs):
         kwargs.get('generator'),
     )
     return {'num_channels_latents': num_channels_latents, 'latents': latents, **kwargs}
-def prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None):
+def img2img_prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None):
         if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
             raise ValueError(
                 f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"

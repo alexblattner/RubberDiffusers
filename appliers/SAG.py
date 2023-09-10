@@ -13,20 +13,49 @@ import PIL
 import numpy as np
 from functools import partial
 def apply_SAG(pipe):
+    #insert function responsible for defaults
     pipe.denoising_functions.insert(0,partial(SAG_default, pipe ))
-
-    timesteps_index= pipe.denoising_functions.index(pipe.denoiser)
+    #replace denoiser function with another that contains it
+    denoiser_index= pipe.denoising_functions.index(pipe.denoiser)
     inner_denoiser_SAG=pipe.denoiser
     pipe.inner_denoiser_SAG=inner_denoiser_SAG
     pipe.denoiser=partial(denoiser, pipe)
-    pipe.denoising_functions[timesteps_index]=pipe.denoiser
-    timesteps_index= pipe.denoising_functions.index(pipe.call_params)
-    pipe.denoising_functions.insert(timesteps_index,partial(do_self_attention_guidance, pipe ))
+    pipe.denoising_functions[denoiser_index]=pipe.denoiser
+    #insert do_self_attention_guidance before call_params
+    call_params_index= pipe.denoising_functions.index(pipe.call_params)
+    pipe.denoising_functions.insert(call_params_index,partial(do_self_attention_guidance, pipe ))
+    #add pred_x0 function
     pipe.pred_x0=partial(pred_x0,pipe)
+    #add pred_epsilon function
     pipe.pred_epsilon=partial(pred_epsilon,pipe)
+    #add sag_masking function
     pipe.sag_masking=partial(sag_masking,pipe)
-    new_function_index = pipe.denoising_step_functions.index(pipe.compute_previous_noisy_sample)
-    pipe.denoising_step_functions.insert(new_function_index, partial(SAG_self_attention, pipe))
+    #add SAG_self_attention before compute_previous_noisy_sample in step functions
+    compute_previous_noisy_sample_index = pipe.denoising_step_functions.index(pipe.compute_previous_noisy_sample)
+    pipe.denoising_step_functions.insert(compute_previous_noisy_sample_index, partial(SAG_self_attention, pipe))
+    #reverse
+    def remover_SAG():
+        #remove SAG_self_attention before compute_previous_noisy_sample from step functions
+        pipe.denoising_step_functions.pop(compute_previous_noisy_sample_index)
+        #remove pred_x0 function
+        delattr(pipe, f"pred_x0")
+        #remove pred_epsilon function
+        delattr(pipe, f"pred_epsilon")
+        #remove sag_masking function
+        delattr(pipe, f"sag_masking")
+
+        #remove do_self_attention_guidance before call_params
+        pipe.denoising_functions.pop(call_params_index)
+
+        #undo replacement of denoiser function with another that contains it
+        pipe.denoiser=pipe.inner_denoiser_SAG
+        pipe.denoising_functions[denoiser_index]=pipe.denoiser
+        delattr(pipe, f"inner_denoiser_SAG")
+
+        #remove function responsible for defaults
+        pipe.denoising_functions.pop(0)
+
+    pipe.revert_functions.insert(0,remover_SAG)
 class CrossAttnStoreProcessor:
     def __init__(self):
         self.attention_probs = None
@@ -144,8 +173,6 @@ def sag_masking(self, original_latents, attn_map, map_size, t, eps):
 # Modified from diffusers.schedulers.scheduling_ddim.DDIMScheduler.step
 # Note: there are some schedulers that clip or do not return x_0 (PNDMScheduler, DDIMScheduler, etc.)
 def pred_x0(self, sample, model_output, timestep):
-    print(timestep)
-    print(self.scheduler.alphas_cumprod)
     alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
     beta_prod_t = 1 - alpha_prod_t
     if self.scheduler.config.prediction_type == "epsilon":

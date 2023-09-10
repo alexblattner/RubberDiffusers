@@ -15,32 +15,92 @@ from typing import Union
 from diffusers.image_processor import VaeImageProcessor
 from functools import partial
 def apply_inpainting(pipe):
-
+    #add mask processor
     pipe.mask_processor = VaeImageProcessor(
         vae_scale_factor=pipe.vae_scale_factor, do_normalize=False, do_binarize=True, do_convert_grayscale=True
     )
+    #make default function responsible for having default values be the first function
     pipe.denoising_functions.insert(0, partial(inpainting_default, pipe))
-    new_function_index = pipe.denoising_functions.index(pipe.checker)
-    pipe.denoising_functions.insert(new_function_index, partial(inpainting_check_inputs, pipe))
+    #insert inpainting_check_inputs before checker function
+    checker_index = pipe.denoising_functions.index(pipe.checker)
+    pipe.denoising_functions.insert(checker_index, partial(inpainting_check_inputs, pipe))
+    #add prepare_mask_latents
     pipe.prepare_mask_latents=partial(prepare_mask_latents,pipe)
+    #add prepare_latents
     pipe.prepare_latents = partial(prepare_latents, pipe)
+    #add _encode_vae_image
     pipe._encode_vae_image = partial(_encode_vae_image, pipe)
-    new_function_index = pipe.denoising_functions.index(pipe.prepare_latent_var)
+    #replace prepare_latent_var with new version
+    prepare_latent_var_index = pipe.denoising_functions.index(pipe.prepare_latent_var)
+    pipe.inpainting_stored_prepare_latent_var=pipe.prepare_latent_var
     pipe.prepare_latent_var = partial(prepare_latent_var, pipe)
-    pipe.denoising_functions[new_function_index]=pipe.prepare_latent_var
-    pipe.denoising_functions.insert(new_function_index, partial(preprocess_img, pipe))
-    pipe.denoising_functions.insert(new_function_index, partial(set_init_image,pipe))
+    pipe.denoising_functions[prepare_latent_var_index]=pipe.prepare_latent_var
+    #insert 2 functions before prepare_latent_var
+    pipe.denoising_functions.insert(prepare_latent_var_index, partial(preprocess_img, pipe))
+    pipe.denoising_functions.insert(prepare_latent_var_index, partial(set_init_image,pipe))
+    #add get_timesteps
     pipe.get_timesteps=partial(get_timesteps, pipe)
-    timesteps_index= pipe.denoising_functions.index(pipe.prepare_timesteps)
+    #replace prepare_timesteps with newer version
+    prepare_timesteps_index= pipe.denoising_functions.index(pipe.prepare_timesteps)
+    pipe.inpainting_stored_prepare_timesteps=pipe.prepare_timesteps
     pipe.prepare_timesteps=partial(prepare_timesteps, pipe)
-    pipe.denoising_functions[timesteps_index]=pipe.prepare_timesteps
-    timesteps_index= pipe.denoising_functions.index(pipe.denoiser)
-    pipe.denoising_functions.insert(timesteps_index, partial(prepare_mask_latent_variables,pipe))
+    pipe.denoising_functions[prepare_timesteps_index]=pipe.prepare_timesteps
+    #add prepare_mask_latent_variables function before the denoiser
+    denoiser_index= pipe.denoising_functions.index(pipe.denoiser)
+    pipe.denoising_functions.insert(denoiser_index, partial(prepare_mask_latent_variables,pipe))
 
-    new_function_index = pipe.denoising_step_functions.index(pipe.expand_latents)
-    pipe.denoising_step_functions[new_function_index]=partial(expand_latents, pipe)
+    #replace expand_latents with newer version
+    expand_latents_index = pipe.denoising_step_functions.index(pipe.expand_latents)
+    pipe.inpainting_stored_expand_latents=pipe.expand_latents
+    pipe.expand_latents=partial(expand_latents, pipe)
+    pipe.denoising_step_functions[expand_latents_index]=pipe.expand_latents
+    #add num_channel4_conditional as before last function
     pipe.denoising_step_functions.insert(len(pipe.denoising_step_functions) - 1, partial(num_channel4_conditional, pipe))
+    #reverse
+    def remover_inpainting():
+        #remove num_channel4_conditional as before last function
+        pipe.denoising_step_functions.pop(len(pipe.denoising_step_functions) - 1)
 
+        #undo replacement of expand_latents with newer version
+        pipe.expand_latents=pipe.inpainting_stored_expand_latents
+        pipe.denoising_step_functions[expand_latents_index]=pipe.expand_latents
+        delattr(pipe, f"inpainting_stored_expand_latents")
+
+        #remove prepare_mask_latent_variables function before the denoiser
+        pipe.denoising_functions.pop(denoiser_index)
+
+        #undo replacement of prepare_timesteps with newer version
+        pipe.prepare_timesteps=pipe.inpainting_stored_prepare_timesteps
+        pipe.denoising_functions[prepare_timesteps_index]=pipe.prepare_timesteps
+        delattr(pipe, f"inpainting_stored_prepare_timesteps")
+
+        #remove 2 functions before prepare_latent_var
+        pipe.denoising_functions.pop(prepare_latent_var_index)
+        pipe.denoising_functions.pop(prepare_latent_var_index)
+        #remove get_timesteps
+        delattr(pipe, f"get_timesteps")
+
+        #replace prepare_latent_var with new version
+        pipe.prepare_latent_var = pipe.inpainting_stored_prepare_latent_var
+        pipe.denoising_functions[prepare_latent_var_index]=pipe.prepare_latent_var
+        delattr(pipe,f"inpainting_stored_prepare_latent_var")
+
+        #remove prepare_mask_latents
+        delattr(pipe,f"prepare_mask_latents")
+        #remove prepare_latents
+        delattr(pipe,f"prepare_latents")
+        #remove _encode_vae_image
+        delattr(pipe,f"_encode_vae_image")
+
+        #remove inpainting_check_inputs before checker function
+        pipe.denoising_functions.pop(checker_index)
+
+        #remove default function responsible for having default values
+        pipe.denoising_functions.pop(0)
+        #remove mask processor
+        delattr(pipe,f"mask_processor")
+
+    pipe.revert_functions.insert(0,remover_inpainting)
 def inpainting_default(self,**kwargs):
     if kwargs.get('strength') is None:
         kwargs['strength']=0.75
