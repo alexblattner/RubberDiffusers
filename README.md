@@ -124,3 +124,31 @@ Default values:
 sag_scale=0.75
 Requirements:
 prompt= a string or embedding
+
+# undo appliers
+Assuming you'd like to use the same pipeline with different functionalities, you can do something like this:
+```
+apply_SAG(pipe)
+apply_promptFusion(pipe)
+prompt=[["a beautiful park, 4k",5],["volcano, cartoon",20]]
+image=pipe(prompt,num_inference_steps=20).images[0]
+pipe.revert() #this will undo all changes made to your pipeline as if nothing happened to it
+apply_img2img(your_pipe)
+#import controlnets
+openpose = ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_openpose", torch_dtype=torch.float32,local_files_only=True).to('cuda')
+#apply controlnet
+apply_controlnet(your_pipe)
+#add controlnet on your pipe
+your_pipe.add_controlnet(openpose)
+#load relevant images
+buffer=open('openpose.png', 'rb') #this does not exist and is purely an example
+buffer.seek(0)
+image_bytes = buffer.read()
+openpose_image = Image.open(BytesIO(image_bytes))
+image=your_pipe("a handsome alien",image=image,controlnet_image=openpose_image,controlnet_conditioning_scale=0.5).images[0]
+```
+in the code above, we generated an image with SAG and promptfusion, then used controlnet and img2img on it to create another.
+to reset the pipe just do this:
+```
+pipe.revert()
+```
