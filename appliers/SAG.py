@@ -164,16 +164,21 @@ def sag_masking(self, original_latents, attn_map, map_size, t, eps):
     # Blur according to the self-attention mask
     degraded_latents = gaussian_blur_2d(original_latents, kernel_size=9, sigma=1.0)
     degraded_latents = degraded_latents * attn_mask + original_latents * (1 - attn_mask)
-
+    newt=t.view(1)
     # Noise it again to match the noise level
-    degraded_latents = self.scheduler.add_noise(degraded_latents, noise=eps, timesteps=t)
+    degraded_latents = self.scheduler.add_noise(degraded_latents, noise=eps, timesteps=newt)
 
     return degraded_latents
 
 # Modified from diffusers.schedulers.scheduling_ddim.DDIMScheduler.step
 # Note: there are some schedulers that clip or do not return x_0 (PNDMScheduler, DDIMScheduler, etc.)
 def pred_x0(self, sample, model_output, timestep):
-    alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+
+    # Move the tensor from GPU to CPU (if it's not already on CPU)
+    numerical_value = int(timestep.tolist())
+
+    # Convert the tensor to a NumPy array and get the numerical value
+    alpha_prod_t = self.scheduler.alphas_cumprod[numerical_value]
     beta_prod_t = 1 - alpha_prod_t
     if self.scheduler.config.prediction_type == "epsilon":
         pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
@@ -191,7 +196,8 @@ def pred_x0(self, sample, model_output, timestep):
 
     return pred_original_sample
 def pred_epsilon(self, sample, model_output, timestep):
-    alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+    numerical_value = int(timestep.tolist())
+    alpha_prod_t = self.scheduler.alphas_cumprod[numerical_value]
 
     beta_prod_t = 1 - alpha_prod_t
     if self.scheduler.config.prediction_type == "epsilon":
