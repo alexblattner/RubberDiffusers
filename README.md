@@ -7,6 +7,14 @@ This project aims to solve the rigidity problem that diffusers has. Instead of c
 2. run examples.py
 3. choose whatever appliers you want, but warning, some appliers should be applied later if you're stacking them like promptFusion. Also, if you use inpainting, you can't use img2img
 
+or copy this (change whatever you want, it works just like diffusers)
+```
+from rubberDiffusers import StableDiffusionRubberPipeline
+pipe=StableDiffusionRubberPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5", torch_dtype=torch.float32,local_files_only=True,safety_checker=None, requires_safety_checker=False,
+)
+```
+
 # Usage warnings
 Don't use inpainting and img2img together. If you want to apply promptFusion, apply it last. If you want to apply SAG, apply it last (before promptFusion or after, it doesn't matter).
 
@@ -107,3 +115,12 @@ Requirements:
 prompt= a list in a specific format
 
 # apply_SAG
+Assuming you apply nothing else, it will work exactly like in diffusers. In order to use inpainting, you need to do the following:
+```
+apply_SAG(pipe)
+image=pipe("some prompt").images[0]
+```
+Default values:
+sag_scale=0.75
+Requirements:
+prompt= a string or embedding
