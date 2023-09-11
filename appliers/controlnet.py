@@ -136,10 +136,15 @@ def controlnet_default(self,**kwargs):
         kwargs['control_guidance_start'] = 0.0
     if kwargs.get('control_guidance_end') is None:
         kwargs['control_guidance_end'] = 1.0
-    if kwargs.get('controlnet_conditioning_scale') is None:
-        kwargs['controlnet_conditioning_scale'] = [1.0]
     if not isinstance(kwargs.get('controlnet_image'),list):
         kwargs['controlnet_image']=[kwargs.get('controlnet_image')]
+    if kwargs.get('controlnet_conditioning_scale') is None:
+        arr=[]
+        for i in kwargs['controlnet_image']:
+            arr.append(1.0)
+        kwargs['controlnet_conditioning_scale'] = arr
+    if not isinstance(kwargs.get('controlnet_conditioning_scale'),list):
+        kwargs['controlnet_conditioning_scale'] = [kwargs.get('controlnet_conditioning_scale')]
     return kwargs
 def loadControlnet(self, controlnet: ControlNetModel):
     self.controlnet=BetterMultiControlnet(controlnet)
