@@ -49,13 +49,16 @@ control_guidance_end=1.0
 controlnet_conditioning_scale=1.0 for each controlnet
 Requirements:
 controlnet_image=single image or list of images
+loading the controlnets
 
 # apply_Correction
 It essentially applies https://arxiv.org/pdf/2305.08891.pdf. No other changes are made on the pipeline. So it ends up being the same as the one in diffusers. To use it:
 ```
 apply_Correction(your_pipe)
-image=your_pipe("a dog").images[0]
+image=your_pipe("a dog",guidance_rescale=0.5).images[0]
 ```
+Default values:
+guidance_rescale=0.0
 
 # apply_img2img
 Assuming you apply nothing else, it will work exactly like in diffusers. In order to use img2img, you need to do the following:
