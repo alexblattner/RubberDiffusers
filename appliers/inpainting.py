@@ -59,7 +59,7 @@ def apply_inpainting(pipe):
     #reverse
     def remover_inpainting():
         #remove num_channel4_conditional as before last function
-        pipe.denoising_step_functions.pop(len(pipe.denoising_step_functions) - 1)
+        pipe.denoising_step_functions.pop(len(pipe.denoising_step_functions) - 2)
 
         #undo replacement of expand_latents with newer version
         pipe.expand_latents=pipe.inpainting_stored_expand_latents

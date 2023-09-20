@@ -28,29 +28,12 @@ from diffusers.configuration_utils import FrozenDict
 from diffusers import StableDiffusionPipeline
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler,KarrasDiffusionSchedulers,DDPMScheduler
-# def preprocess(image):
-#     if isinstance(image, torch.Tensor):
-#         return image
-#     elif isinstance(image, PIL.Image.Image):
-#         image = [image]
+from functools import partial
 
-#     if isinstance(image[0], PIL.Image.Image):
-#         w, h = image[0].size
-#         w, h = (x - x % 64 for x in (w, h))  # resize to integer multiple of 64
-
-#         image = [np.array(i.resize((w, h)))[None, :] for i in image]
-#         image = np.concatenate(image, axis=0)
-#         image = np.array(image).astype(np.float32) / 255.0
-#         image = image.transpose(0, 3, 1, 2)
-#         image = 2.0 * image - 1.0
-#         image = torch.from_numpy(image)
-#     elif isinstance(image[0], torch.Tensor):
-#         image = torch.cat(image, dim=0)
-#     return image
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class StableDiffusionRubberPipeline(StableDiffusionPipeline):
-    call_funcs = []
+    revert_functions = []
 
     def __init__(
         self,
@@ -175,7 +158,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         return_dict: bool = True,
         callback_steps: int = 1,
         num_images_per_prompt: Optional[int] = 1,
-        guidance_rescale: float = 0.0,
         output_type: Optional[str] = "pil",
         **kwargs
     ):
@@ -186,7 +168,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         kwargs['return_dict'] = return_dict
         kwargs['callback_steps'] = callback_steps
         kwargs['num_images_per_prompt'] = num_images_per_prompt
-        kwargs['guidance_rescale'] = guidance_rescale
         kwargs['output_type'] = output_type
         for func in self.denoising_functions:
             kwargs = func(**kwargs)
@@ -244,18 +225,16 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             lora_scale=text_encoder_lora_scale,
         )
         kwargs['prompt_embeds'] = prompt_embeds
-        kwargs['prompt_embeds_dtype'] = prompt_embeds.dtype
+        kwargs['dtype'] = prompt_embeds.dtype
         return {'text_encoder_lora_scale': text_encoder_lora_scale, 'prompt_embeds': prompt_embeds, **kwargs}
 
     def prepare_timesteps(self, **kwargs):
-
         self.scheduler.set_timesteps(kwargs.get(
             'num_inference_steps'), device=kwargs.get('device'))
         timesteps = self.scheduler.timesteps
         return {'timesteps': timesteps, **kwargs}
 
     def prepare_latent_var(self, **kwargs):
-
         num_channels_latents = self.unet.config.in_channels
         
         latents = self.prepare_latents(
@@ -263,7 +242,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             num_channels_latents,
             kwargs.get('height'),
             kwargs.get('width'),
-            kwargs.get('prompt_embeds_dtype'),
+            kwargs.get('dtype'),
             kwargs.get('device'),
             kwargs.get('generator'),
             kwargs.get('latents'),
@@ -300,13 +279,13 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
     def perform_guidance(self, i, t, **kwargs):
         do_classifier_free_guidance = kwargs.get('do_classifier_free_guidance')
         guidance_scale = kwargs.get('guidance_scale')
-        guidance_rescale = kwargs.get('guidance_rescale')
         rescale_noise_cfg = kwargs.get('rescale_noise_cfg')
         noise_pred = kwargs.get('noise_pred')
         
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            kwargs['noise_pred_text']=noise_pred_text
         kwargs['noise_pred'] = noise_pred
         kwargs['noise_pred_uncond'] = noise_pred_uncond
         return kwargs
@@ -324,7 +303,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         num_warmup_steps = len(timesteps) - kwargs.get('num_inference_steps') * self.scheduler.order
         callback = kwargs.get('callback')
         callback_steps = kwargs.get('callback_steps')
-        
         if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
             if callback is not None and i % callback_steps == 0:
                 callback(i, t, latents)
@@ -351,12 +329,14 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         return_dict = True
         device = self._execution_device
         prompt_embeds = kwargs.get("prompt_embeds")
-        dtype=kwargs.get('prompt_embeds_dtype')
+        dtype=kwargs.get('dtype')
         if not output_type == "latent":
             image = self.vae.decode(
                 latents / self.vae.config.scaling_factor, return_dict=False)[0]
-            image, has_nsfw_concept = self.run_safety_checker(
-                image, device, dtype)
+            if not kwargs.get('nsfw'):
+                image, has_nsfw_concept = self.run_safety_checker(image, device, dtype)
+            else:
+                has_nsfw_concept=None
         else:
             image = latents
             has_nsfw_concept = None
@@ -377,3 +357,11 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    def revert(self):
+        print("revert")
+        i=0
+        for func in self.revert_functions:
+            func()
+            del func
+            i+=1
+        self.revert_functions=[]

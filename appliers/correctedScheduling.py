@@ -13,6 +13,8 @@ import PIL
 import numpy as np
 from functools import partial
 def apply_Correction(pipe):
+    pipe.denoising_functions.insert(0, partial(Correction_default, pipe))
+
     new_function_index = pipe.denoising_step_functions.index(pipe.compute_previous_noisy_sample)
     pipe.denoising_step_functions.insert(new_function_index, partial(correction, pipe))
     
@@ -20,6 +22,7 @@ def apply_Correction(pipe):
     #reverse
     def remover_Correction():
         pipe.denoising_step_functions.pop(new_function_index)
+        pipe.denoising_functions.pop(0)
 
     pipe.revert_functions.insert(0,remover_Correction)
 
@@ -35,10 +38,13 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
+def Correction_default(self,**kwargs):
+    if kwargs.get('guidance_rescale') is None:
+        kwargs['guidance_rescale']=0.0
+    return kwargs
 def correction(self, i, t, **kwargs):
     do_classifier_free_guidance=kwargs.get('do_classifier_free_guidance')
     guidance_rescale=kwargs.get('guidance_rescale')
-    rescale_noise_cfg=kwargs.get('rescale_noise_cfg')
     noise_pred=kwargs.get('noise_pred')
     noise_pred_text=kwargs.get('noise_pred_text')
     if do_classifier_free_guidance and guidance_rescale > 0.0:
