@@ -4,11 +4,15 @@ from diffusers.utils import(
     deprecate,
     is_accelerate_available,
     is_accelerate_version,
-    is_compiled_module,
     logging,
-    randn_tensor,
     replace_example_docstring,
 )
+try:
+    # Try the old import path
+    from diffusers.utils import is_compiled_module
+except ImportError:
+    # If the old import path is not available, use the new import path
+    from diffusers.utils.torch_utils import is_compiled_module
 import PIL
 import torch.nn.functional as F
 import numpy as np

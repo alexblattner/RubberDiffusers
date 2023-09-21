@@ -5,9 +5,14 @@ from diffusers.utils import(
     is_accelerate_available,
     is_accelerate_version,
     logging,
-    randn_tensor,
     replace_example_docstring,
 )
+try:
+    # Try the old import path
+    from diffusers.utils import randn_tensor
+except ImportError:
+    # If the old import path is not available, use the new import path
+    from diffusers.utils.torch_utils import randn_tensor
 import PIL
 import numpy as np
 from PIL import Image
