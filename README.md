@@ -62,6 +62,26 @@ image=your_pipe("a dog",guidance_rescale=0.5).images[0]
 Default values:
 guidance_rescale=0.0
 
+# apply_dynamicThreasholding
+this applies this: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding
+```
+apply_dynamicThreasholding(pipe)
+image=pipe("some prompt",mimic_scale=20,guidance_scale=5).images[0]
+```
+Default values:
+mimic_scale=7.0
+threshold_percentile=1.00
+mimic_mode='Constant' #all possible values are: "Linear Down","Half Cosine Down","Cosine Down","Linear Up","Half Cosine Up","Cosine Up","Power Up","Power Down","Linear Repeating","Cosine Repeating","Sawtooth"
+mimic_scale_min=0.0
+cfg_mode='Constant' #all possible values are same as mimic_mode
+cfg_scale_min=0.0
+sched_val=4.0
+experiment_mode=0 #can also be 1,2 or 3, nothing else
+separate_feature_channels=True
+scaling_startpoint='MEAN' #can also be 'ZERO'
+variability_measure='AD' #can also be 'STD'
+interpolate_phi=1.0
+
 # apply_fabric
 It applies this: https://github.com/sd-fabric/fabric
 
