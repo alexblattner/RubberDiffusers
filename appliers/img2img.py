@@ -77,26 +77,15 @@ def apply_img2img(pipe):
 def img2img_default(self,**kwargs):
     if kwargs.get('strength') is None:
         kwargs['strength']=0.75
+    if kwargs.get('skip_noise') is None:
+        kwargs['skip_noise']=False
     return kwargs
 def img2img_check_inputs(self,**kwargs):
     strength=kwargs.get('strength')
     image=kwargs.get('image')
     callback_steps=kwargs.get('callback_steps')
     def check_single_image_dimensions(image):
-        if isinstance(image, torch.FloatTensor):
-            image = image.numpy()
-        elif isinstance(image, Image.Image):
-            image = np.array(image)
-
-        if not isinstance(image, np.ndarray):   
-            raise TypeError("Unsupported image type")
-
-        height, width = image.shape[:2]
-
-        if height % 8 != 0:
-            raise ValueError(f"The height is not divisible by 8 and is {height}")
-        if width % 8 != 0:
-            raise ValueError(f"The width is not divisible by 8 and is {width}")
+        innnn=5
     if strength < 0 or strength > 1:
         raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
     
@@ -140,9 +129,10 @@ def prepare_latent_var(self, **kwargs):
         kwargs.get('dtype'),
         kwargs.get('device'),
         kwargs.get('generator'),
+        kwargs.get('skip_noise'),
     )
     return {'num_channels_latents': num_channels_latents, 'latents': latents, **kwargs}
-def img2img_prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None):
+def img2img_prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None,skip_noise=False):
         if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
             raise ValueError(
                 f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
@@ -193,7 +183,8 @@ def img2img_prepare_latents(self, image, timestep, batch_size, num_images_per_pr
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
 
         # get latents
-        init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
+        if not skip_noise:
+            init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
         latents = init_latents
 
         return latents

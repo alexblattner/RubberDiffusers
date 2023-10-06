@@ -135,7 +135,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             requires_safety_checker=requires_safety_checker)
         self.denoising_functions = [self.dimension, self.checker, self.determine_batch_size, self.call_params, self.encode_input,
                                     self.prepare_timesteps, self.prepare_latent_var, self.prepare_extra_kwargs, self.denoiser, self.postProcess]
-        self.denoising_step_functions = [self.expand_latents, self.predict_noise_residual,
+        self.denoising_step_functions = [self.expand_latents,self.scale_model_input, self.predict_noise_residual,
                                           self.perform_guidance, self.compute_previous_noisy_sample, self.call_callback]
         # The original functions were replaced with a bit different functions
         # self.denoising_step_functions = [
@@ -159,6 +159,8 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         callback_steps: int = 1,
         num_images_per_prompt: Optional[int] = 1,
         output_type: Optional[str] = "pil",
+        clip_skip: Optional[int] = None,
+        cross_attention_kwargs: Optional[dict]=dict(),
         **kwargs
     ):
         kwargs['prompt'] = prompt
@@ -169,6 +171,8 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         kwargs['callback_steps'] = callback_steps
         kwargs['num_images_per_prompt'] = num_images_per_prompt
         kwargs['output_type'] = output_type
+        kwargs['clip_skip']=clip_skip
+        kwargs['cross_attention_kwargs']=cross_attention_kwargs
         for func in self.denoising_functions:
             kwargs = func(**kwargs)
         return kwargs
@@ -192,6 +196,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         else:
             batch_size = kwargs.get('prompt_embeds').shape[0]
         kwargs['batch_size']= batch_size
+        kwargs['num_images']=batch_size*kwargs.get('num_images_per_prompt')
         return kwargs
     def call_params(self, **kwargs):
         device = self._execution_device
@@ -213,8 +218,8 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         negative_prompt = kwargs.get('negative_prompt')
         prompt_embeds = kwargs.get('prompt_embeds')
         negative_prompt_embeds = kwargs.get('negative_prompt_embeds')
-        text_encoder_lora_scale = kwargs.get('text_encoder_lora_scale')
-        prompt_embeds = self._encode_prompt(
+        clip_skip=kwargs.get('clip_skip')
+        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
             device,
             num_images_per_prompt,
@@ -223,8 +228,15 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
             lora_scale=text_encoder_lora_scale,
+            clip_skip=clip_skip,
         )
+        # For classifier free guidance, we need to do two forward passes.
+        # Here we concatenate the unconditional and text embeddings into a single batch
+        # to avoid doing two forward passes
+        if do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
         kwargs['prompt_embeds'] = prompt_embeds
+        kwargs['negative_prompt_embeds']=negative_prompt_embeds
         kwargs['dtype'] = prompt_embeds.dtype
         return {'text_encoder_lora_scale': text_encoder_lora_scale, 'prompt_embeds': prompt_embeds, **kwargs}
 
@@ -264,16 +276,17 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
         kwargs['latent_model_input'] = latent_model_input
         return kwargs
-
+    def scale_model_input(self,i,t,**kwargs):
+        kwargs['latent_model_input'] = self.scheduler.scale_model_input(kwargs.get('latent_model_input'), t)
+        return kwargs
     def predict_noise_residual(self, i, t, **kwargs):
         prompt_embeds = kwargs.get('prompt_embeds')
         cross_attention_kwargs = kwargs.get('cross_attention_kwargs')
         latent_model_input = kwargs.get('latent_model_input')
-        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+        latent_model_input = kwargs.get('latent_model_input')
         noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, 
                         cross_attention_kwargs=cross_attention_kwargs, return_dict=False)[0]
         kwargs['noise_pred'] = noise_pred
-        kwargs['latent_model_input'] = latent_model_input
         return kwargs
 
     def perform_guidance(self, i, t, **kwargs):
@@ -315,6 +328,8 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
 
         with self.progress_bar(total=kwargs.get('num_inference_steps')) as progress_bar:
             for i, t in enumerate(timesteps):
+                if kwargs.get('stop_step') is not None and i == kwargs.get('stop_step'):
+                    break
                 for func in self.denoising_step_functions:
                     kwargs =func(i,t, **kwargs)
 
@@ -359,9 +374,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
     def revert(self):
         print("revert")
-        i=0
         for func in self.revert_functions:
             func()
             del func
-            i+=1
         self.revert_functions=[]
