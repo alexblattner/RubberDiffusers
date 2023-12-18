@@ -22,7 +22,12 @@ Don't use inpainting and img2img together. If you want to apply promptFusion, ap
 
 # vanilla RubberDiffusers
 This works exactly the same as the regular txt2img pipeline from the diffusers library. I just removed the stuff related to this paper: https://arxiv.org/pdf/2305.08891.pdf. If you want to use it, use apply_Correction.
-
+```
+pipe = StableDiffusionRubberPipeline.from_single_file(
+   "your local model or use from_pretrained idk"
+)
+images=pipe("your prompt like usual").images
+```
 # apply_controlnet
 In order to use controlnet, you need to do the following:
 ```
@@ -187,6 +192,48 @@ Requirements:
 image= an image or list of images
 
 mask_image= an image or list of images
+
+# apply_ipAdapter
+This will enable ip adapter for use. However, for full revert, you'll need to save the unet before applying because the diffusers implementation changes the unet too.
+Usage:
+```
+pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin",cache_dir="model_cache")
+apply_ipAdapter(pipe)
+prompt="a dog or something"
+img=Image.open('your_image.png').convert('RGB')
+image=pipe(prompt,num_inference_steps=20,ip_adapter_image=img).images[0]
+```
+Default values:
+
+same as the regular txt2img pipeline from diffusers
+
+Requirements:
+
+use load_ip_adapter first and use ip_adapter_image
+
+# apply_multiDiffusion
+This will let you apply prompts regionally simultaneously. To use with promptFusion, you must apply promptFusion after it (Example: [[["a beautiful night in the park, high quality","mona lisa, high quality","moon"],4],[["a beautiful day in the park, high quality","mona lisa, high quality","sun"],28]]).
+Usage:
+```
+apply_multiDiffusion(pipe)
+prompt=["a beautiful night in the park, high quality","mona lisa, high quality","moon"] # 3 prompts whose order matter
+mask_image=Image.open('mask_image.png').convert('RGB')
+pos=["0:0-512:512",mask_image,"8:8-128:128"] # those are the areas the prompts will be applied
+mask_z_index=[1,12,2] # those are the strengths of each prompt 12 is the highest in strength in this case (no limits)
+
+image=pipe(prompt,width=512,height=512,num_inference_steps=20,ip_adapter_image=img).images[0]
+```
+Default values:
+
+same as the regular txt2img pipeline from diffusers
+
+Requirements:
+
+prompt/prompt_embeds = a list of strings/prompt_embeds
+
+pos= a list of strings in the format (x1:y1-x2:y2 those values are in pixels and must be within the dimensions of the image, this makes a square) or a mask from an image. Also, the list must be the same length as prompt/prompt_embeds
+
+mask_z_index= a list of ints that must be the same length as prompt/prompt_embeds
 
 # apply_promptFusion
 This will give you the ability to change prompt mid generation. The result is something like in here: https://github.com/ljleb/prompt-fusion-extension. My syntax is different though.
