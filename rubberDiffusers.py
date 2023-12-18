@@ -18,7 +18,7 @@ import numpy as np
 import torch.nn.functional as F
 import PIL
 import torch
-from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer,CLIPVisionModelWithProjection
 import torchvision
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
@@ -31,7 +31,48 @@ from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMSchedu
 from functools import partial
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+def retrieve_timesteps(
+    scheduler,
+    num_inference_steps: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    timesteps: Optional[List[int]] = None,
+    **kwargs,
+):
+    """
+    Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
+    custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
 
+    Args:
+        scheduler (`SchedulerMixin`):
+            The scheduler to get timesteps from.
+        num_inference_steps (`int`):
+            The number of diffusion steps used when generating samples with a pre-trained model. If used,
+            `timesteps` must be `None`.
+        device (`str` or `torch.device`, *optional*):
+            The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
+        timesteps (`List[int]`, *optional*):
+                Custom timesteps used to support arbitrary spacing between timesteps. If `None`, then the default
+                timestep spacing strategy of the scheduler is used. If `timesteps` is passed, `num_inference_steps`
+                must be `None`.
+
+    Returns:
+        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        second element is the number of inference steps.
+    """
+    if timesteps is not None:
+        accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        if not accepts_timesteps:
+            raise ValueError(
+                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
+                f" timestep schedules. Please check whether you are using the correct scheduler."
+            )
+        scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
+        timesteps = scheduler.timesteps
+        num_inference_steps = len(timesteps)
+    else:
+        scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
+        timesteps = scheduler.timesteps
+    return timesteps, num_inference_steps
 class StableDiffusionRubberPipeline(StableDiffusionPipeline):
     revert_functions = []
 
@@ -44,11 +85,12 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         scheduler: KarrasDiffusionSchedulers,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
+        image_encoder: CLIPVisionModelWithProjection = None,
         requires_safety_checker: bool = True,
     ):
         self.before_init()
         super().__init__(vae, text_encoder, tokenizer, unet, scheduler,
-                         safety_checker, feature_extractor, requires_safety_checker)
+                         safety_checker, feature_extractor, image_encoder,requires_safety_checker)
 
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
             deprecation_message = (
@@ -59,8 +101,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
                 " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
                 " file"
             )
-            deprecate("steps_offset!=1", "1.0.0",
-                      deprecation_message, standard_warn=False)
+            deprecate("steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False)
             new_config = dict(scheduler.config)
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
@@ -73,8 +114,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
                 " future versions. If you have downloaded this checkpoint from the Hugging Face Hub, it would be very"
                 " nice if you could open a Pull request for the `scheduler/scheduler_config.json` file"
             )
-            deprecate("clip_sample not set", "1.0.0",
-                      deprecation_message, standard_warn=False)
+            deprecate("clip_sample not set", "1.0.0", deprecation_message, standard_warn=False)
             new_config = dict(scheduler.config)
             new_config["clip_sample"] = False
             scheduler._internal_dict = FrozenDict(new_config)
@@ -98,8 +138,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
             version.parse(unet.config._diffusers_version).base_version
         ) < version.parse("0.9.0.dev0")
-        is_unet_sample_size_less_64 = hasattr(
-            unet.config, "sample_size") and unet.config.sample_size < 64
+        is_unet_sample_size_less_64 = hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
         if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
             deprecation_message = (
                 "The configuration file of the unet has set the default `sample_size` to smaller than"
@@ -112,12 +151,11 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
                 " checkpoint from the Hugging Face Hub, it would be very nice if you could open a Pull request for"
                 " the `unet/config.json` file"
             )
-            deprecate("sample_size<64", "1.0.0",
-                      deprecation_message, standard_warn=False)
+            deprecate("sample_size<64", "1.0.0", deprecation_message, standard_warn=False)
             new_config = dict(unet.config)
             new_config["sample_size"] = 64
             unet._internal_dict = FrozenDict(new_config)
-        self.scheduler = scheduler
+
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -126,15 +164,13 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
         )
-        self.vae_scale_factor = 2 ** (
-            len(self.vae.config.block_out_channels) - 1)
-        self.image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor)
-        self.register_to_config(
-            requires_safety_checker=requires_safety_checker)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.register_to_config(requires_safety_checker=requires_safety_checker)
         self.denoising_functions = [self.dimension, self.checker, self.determine_batch_size, self.call_params, self.encode_input,
-                                    self.prepare_timesteps, self.prepare_latent_var, self.prepare_extra_kwargs, self.denoiser, self.postProcess]
+                                    self.prepare_timesteps, self.prepare_latent_var, self.prepare_extra_kwargs,self.guidance_scale_embedding, self.denoiser, self.postProcess]
         self.denoising_step_functions = [self.expand_latents,self.scale_model_input, self.predict_noise_residual,
                                           self.perform_guidance, self.compute_previous_noisy_sample, self.call_callback]
         # The original functions were replaced with a bit different functions
@@ -154,6 +190,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         prompt: Union[str, List[str]] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
+        guidance_rescale: float = 0.0,
         eta: float = 0.0,
         return_dict: bool = True,
         callback_steps: int = 1,
@@ -161,11 +198,13 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         output_type: Optional[str] = "pil",
         clip_skip: Optional[int] = None,
         cross_attention_kwargs: Optional[dict]=dict(),
+        
         **kwargs
     ):
         kwargs['prompt'] = prompt
         kwargs['num_inference_steps'] = num_inference_steps
         kwargs['guidance_scale'] = guidance_scale
+        kwargs['guidance_rescale'] = guidance_rescale
         kwargs['eta'] = eta
         kwargs['return_dict'] = return_dict
         kwargs['callback_steps'] = callback_steps
@@ -173,6 +212,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         kwargs['output_type'] = output_type
         kwargs['clip_skip']=clip_skip
         kwargs['cross_attention_kwargs']=cross_attention_kwargs
+
         for func in self.denoising_functions:
             kwargs = func(**kwargs)
         return kwargs
@@ -189,6 +229,10 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         )
         return kwargs
     def determine_batch_size(self, **kwargs):
+        self._guidance_scale = kwargs['guidance_scale']
+        self._guidance_rescale = kwargs['guidance_rescale']
+        self._clip_skip = kwargs['clip_skip']
+        self._cross_attention_kwargs = kwargs['cross_attention_kwargs']
         if kwargs.get('prompt') is not None and isinstance(kwargs.get('prompt'), str):
             batch_size = 1
         elif kwargs.get('prompt') is not None and isinstance(kwargs.get('prompt'), list):
@@ -196,7 +240,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         else:
             batch_size = kwargs.get('prompt_embeds').shape[0]
         kwargs['batch_size']= batch_size
-        kwargs['num_images']=batch_size*kwargs.get('num_images_per_prompt')
         return kwargs
     def call_params(self, **kwargs):
         device = self._execution_device
@@ -204,6 +247,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = kwargs.get('guidance_scale') > 1.0
+        
         return {'device': device, 'do_classifier_free_guidance': do_classifier_free_guidance, **kwargs}
 
     def encode_input(self, **kwargs):
@@ -241,10 +285,8 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         return {'text_encoder_lora_scale': text_encoder_lora_scale, 'prompt_embeds': prompt_embeds, **kwargs}
 
     def prepare_timesteps(self, **kwargs):
-        self.scheduler.set_timesteps(kwargs.get(
-            'num_inference_steps'), device=kwargs.get('device'))
-        timesteps = self.scheduler.timesteps
-        return {'timesteps': timesteps, **kwargs}
+        kwargs['timesteps'], kwargs['num_inference_steps'] = retrieve_timesteps(self.scheduler, kwargs.get('num_inference_steps'), kwargs.get('device'), kwargs.get('timesteps'))
+        return kwargs
 
     def prepare_latent_var(self, **kwargs):
         num_channels_latents = self.unet.config.in_channels
@@ -262,18 +304,31 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         return {'num_channels_latents': num_channels_latents, 'latents': latents, **kwargs}
 
     def prepare_extra_kwargs(self, **kwargs):
-
         generator = kwargs.get('generator')
         eta = kwargs.get('eta')
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
         return {'extra_step_kwargs': extra_step_kwargs, **kwargs}
 
-
+    def guidance_scale_embedding(self,**kwargs):
+        timestep_cond = None
+        if self.unet.config.time_cond_proj_dim is not None:
+            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(kwargs.get('batch_size') * kwargs.get('num_images_per_prompt'))
+            timestep_cond = self.get_guidance_scale_embedding(
+                guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
+            ).to(device=kwargs.get('device'), dtype=kwargs.get('dtype'))
+        kwargs['timestep_cond']=timestep_cond
+        self._num_timesteps = len(kwargs.get('timesteps'))
+        return kwargs
     
     def expand_latents(self, i, t, **kwargs):
         latents = kwargs.get('latents')
         do_classifier_free_guidance = kwargs.get('do_classifier_free_guidance')
         latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+        lss=kwargs.get("last_step_strength")
+        num_inference_steps=kwargs.get('num_inference_steps')
+        stop_step=kwargs.get('stop_step')
+        if lss is not None and (i==num_inference_steps or (stop_step is not None and i==stop_step-1)):
+            latent_model_input*=lss
         kwargs['latent_model_input'] = latent_model_input
         return kwargs
     def scale_model_input(self,i,t,**kwargs):
@@ -283,9 +338,9 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         prompt_embeds = kwargs.get('prompt_embeds')
         cross_attention_kwargs = kwargs.get('cross_attention_kwargs')
         latent_model_input = kwargs.get('latent_model_input')
-        latent_model_input = kwargs.get('latent_model_input')
-        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, 
-                        cross_attention_kwargs=cross_attention_kwargs, return_dict=False)[0]
+        added_cond_kwargs=kwargs.get('added_cond_kwargs')
+        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, timestep_cond=kwargs.get('timestep_cond'),
+                        cross_attention_kwargs=cross_attention_kwargs, added_cond_kwargs=added_cond_kwargs,return_dict=False)[0]
         kwargs['noise_pred'] = noise_pred
         return kwargs
 
@@ -306,6 +361,7 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
     def compute_previous_noisy_sample(self, i, t, **kwargs):
         latents = kwargs.get('latents')
         noise_pred = kwargs.get('noise_pred')
+
         latents = self.scheduler.step(noise_pred, t, latents, **kwargs.get('extra_step_kwargs'), return_dict=False)[0]
         kwargs['latents'] = latents
         return kwargs
