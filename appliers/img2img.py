@@ -17,20 +17,24 @@ import PIL
 import numpy as np
 from PIL import Image
 from functools import partial
-def get_function_names(obj):
-    function_names = [name for name in dir(obj) if callable(getattr(obj, name))]
-    return function_names
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_img2img(pipe):
     #insert defaults function
     pipe.denoising_functions.insert(0, partial(img2img_default, pipe))
     #insert img2img_check_inputs before checker function
-    checker_index = pipe.denoising_functions.index(pipe.checker)
+    checker_index = find_index(pipe.denoising_functions,"checker")
     pipe.denoising_functions.insert(checker_index, partial(img2img_check_inputs, pipe))
     #insert img2img_prepare_latents
     pipe.img2img_prepare_latents = partial(img2img_prepare_latents, pipe)
 
     #replace prepare_latent_var
-    latent_var_index = pipe.denoising_functions.index(pipe.prepare_latent_var)
+    latent_var_index = find_index(pipe.denoising_functions,"prepare_latent_var")
     pipe.img2img_stored_prepare_latent_var=pipe.prepare_latent_var
     pipe.prepare_latent_var = partial(prepare_latent_var, pipe)
     pipe.denoising_functions[latent_var_index]=pipe.prepare_latent_var
@@ -41,7 +45,7 @@ def apply_img2img(pipe):
     pipe.img2img_get_timesteps=partial(img2img_get_timesteps, pipe)
 
     #replace prepare_timesteps
-    timesteps_index= pipe.denoising_functions.index(pipe.prepare_timesteps)
+    timesteps_index= find_index(pipe.denoising_functions,"prepare_timesteps")
     pipe.img2img_stored_prepare_timesteps=pipe.prepare_timesteps
     pipe.prepare_timesteps=partial(prepare_timesteps, pipe)
     pipe.denoising_functions[timesteps_index]=pipe.prepare_timesteps

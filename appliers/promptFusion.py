@@ -11,22 +11,29 @@ from diffusers.utils import(
 import PIL
 import numpy as np
 from functools import partial
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_promptFusion(pipe):
     #replace checker with a new function that contains it
-    checker_index= pipe.denoising_functions.index(pipe.checker)
+    checker_index= find_index(pipe.denoising_functions,"checker")
     inner_checker_promptFusion=pipe.checker
     pipe.inner_checker_promptFusion=inner_checker_promptFusion
     pipe.checker=partial(checker, pipe)
     pipe.denoising_functions[checker_index]=pipe.checker
     #replace encode_input with a new function that contains it
-    encode_input_index= pipe.denoising_functions.index(pipe.encode_input)
+    encode_input_index= find_index(pipe.denoising_functions,"encode_input")
     inner_encode_input_promptFusion=pipe.encode_input
     pipe.inner_encode_input_promptFusion=inner_encode_input_promptFusion
     pipe.encode_input=partial(encode_input, pipe)
     pipe.denoising_functions[encode_input_index]=pipe.encode_input
 
     #replace determine_batch_size with a new version of it
-    determine_batch_size_index= pipe.denoising_functions.index(pipe.determine_batch_size)
+    determine_batch_size_index= find_index(pipe.denoising_functions,"determine_batch_size")
     pipe.promptFusion_stored_determine_batch_size=pipe.determine_batch_size
     pipe.determine_batch_size=partial(determine_batch_size, pipe)
     pipe.denoising_functions[determine_batch_size_index]=pipe.determine_batch_size
@@ -93,7 +100,7 @@ def checker(self, **kwargs):
             if negative_prompt[idx][1]>num_inference_steps:
                 raise ValueError(f"negative_prompt has a step greater than {num_inference_steps}")
         if prompt_embeds is None:
-            kwargs['prompt_embeds']=None  
+            kwargs['prompt_embeds']=None
         else:
             kwargs['prompt_embeds']=prompt_embeds[idx][0]
             if prompt_embeds[idx][1]>num_inference_steps:
@@ -115,14 +122,15 @@ def determine_batch_size(self, **kwargs):
     if batch_size is None:
         prompt=kwargs['prompt']
         prompt_embeds=kwargs['prompt_embeds']
-        if prompt is not None and isinstance(prompt[0][0], str):
+        if prompt is not None and isinstance(prompt[0][1], int):
             batch_size = 1
         elif prompt is not None and isinstance(prompt[0][0], list):
-            batch_size = prompt.shape[0]
+            batch_size = len(kwargs.get('prompt'))
         elif prompt_embeds is not None and isinstance(prompt_embeds[0][1], int):
             batch_size = 1
-        elif prompt is not None and isinstance(prompt[0][1], list):
-            batch_size = prompt_embeds.shape[0]
+        else:
+            batch_size = len(kwargs.get('prompt_embeds'))
+    kwargs['num_images']=batch_size*kwargs.get('num_images_per_prompt')
     kwargs['batch_size']=batch_size
     return kwargs
 def encode_input(self, **kwargs):

@@ -22,6 +22,13 @@ from diffusers.pipelines.controlnet.pipeline_controlnet import StableDiffusionCo
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.controlnet import ControlNetModel
 from functools import partial
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_controlnet(pipe):
     #add controlnet image processor
     pipe.control_image_processor = VaeImageProcessor(
@@ -42,25 +49,26 @@ def apply_controlnet(pipe):
     #add the controlnet_sub_check_image function
     pipe.controlnet_sub_check_image=partial(StableDiffusionControlNetPipeline.check_image,pipe)
     #get checker index
-    checker_index = pipe.denoising_functions.index(pipe.checker)
+    checker_index = find_index(pipe.denoising_functions,"checker")
+
     #add 2 functions at checker_index
     pipe.denoising_functions.insert(checker_index, partial(controlnet_check_inputs, pipe))
     pipe.denoising_functions.insert(checker_index, partial(controlnet_adjustments, pipe))
 
     #add controlnet_conditional_guess_adjustments before enncode_input function
-    encode_input_index = pipe.denoising_functions.index(pipe.encode_input)
+    encode_input_index = find_index(pipe.denoising_functions,"encode_input")
     pipe.denoising_functions.insert(encode_input_index, partial(controlnet_conditional_guess_adjustments, pipe))
 
     #add controlnet_prepare_image before prepare_timesteps function
-    prepare_timesteps_index = pipe.denoising_functions.index(pipe.prepare_timesteps)
+    prepare_timesteps_index = find_index(pipe.denoising_functions,"prepare_timesteps")
     pipe.denoising_functions.insert(prepare_timesteps_index, partial(controlnet_prepare_image, pipe))
     
     #add controlnet_keep_set before denoiser function
-    denoiser_index = pipe.denoising_functions.index(pipe.denoiser)
+    denoiser_index = find_index(pipe.denoising_functions,"denoiser")
     pipe.denoising_functions.insert(denoiser_index, partial(controlnet_keep_set, pipe))
     
     #replace predict_noise_residual function with a new predict_noise_residual function
-    predict_noise_residual_index=pipe.denoising_step_functions.index(pipe.predict_noise_residual)
+    predict_noise_residual_index=find_index(pipe.denoising_step_functions,"predict_noise_residual")
     pipe.controlnet_stored_predict_noise_residual=pipe.predict_noise_residual
     pipe.predict_noise_residual=partial(predict_noise_residual,pipe)
     pipe.denoising_step_functions[predict_noise_residual_index]=pipe.predict_noise_residual
@@ -68,7 +76,7 @@ def apply_controlnet(pipe):
     pipe.denoising_step_functions.insert(predict_noise_residual_index,partial(controlnet_denoising,pipe))
     
     #add controlnet_offloading before postProcess
-    new_function_index = pipe.denoising_functions.index(pipe.postProcess)
+    new_function_index = find_index(pipe.denoising_functions,"postProcess")
     pipe.denoising_functions.insert(new_function_index, partial(controlnet_offloading, pipe))
     #reverse
     def remover_controlnet():
@@ -399,7 +407,6 @@ def controlnet_denoising(self, i, t, **kwargs):
     cond_scale=kwargs.get('cond_scale')
     controlnet_keep=kwargs.get('controlnet_keep')
     latent_model_input = kwargs.get('latent_model_input')
-    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
     if guess_mode and do_classifier_free_guidance:
         # Infer ControlNet only for the conditional batch.
         control_model_input = latents
@@ -440,6 +447,7 @@ def predict_noise_residual(self,i,t,**kwargs):
     latent_model_input = kwargs.get('latent_model_input')
     down_block_res_samples = kwargs.get('down_block_res_samples')
     mid_block_res_sample = kwargs.get('mid_block_res_sample')
+    added_cond_kwargs = kwargs.get('added_cond_kwargs')
     noise_pred = self.unet(
         latent_model_input,
         t,
@@ -447,6 +455,7 @@ def predict_noise_residual(self,i,t,**kwargs):
         cross_attention_kwargs=cross_attention_kwargs,
         down_block_additional_residuals=down_block_res_samples,
         mid_block_additional_residual=mid_block_res_sample,
+        added_cond_kwargs=added_cond_kwargs,
         return_dict=False,
     )[0]
     kwargs['noise_pred']=noise_pred

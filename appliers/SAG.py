@@ -11,17 +11,24 @@ from diffusers.utils import(
 import PIL
 import numpy as np
 from functools import partial
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_SAG(pipe):
     #insert function responsible for defaults
     pipe.denoising_functions.insert(0,partial(SAG_default, pipe ))
     #replace denoiser function with another that contains it
-    denoiser_index= pipe.denoising_functions.index(pipe.denoiser)
+    denoiser_index= find_index(pipe.denoising_functions,"denoiser")
     inner_denoiser_SAG=pipe.denoiser
     pipe.inner_denoiser_SAG=inner_denoiser_SAG
     pipe.denoiser=partial(denoiser, pipe)
     pipe.denoising_functions[denoiser_index]=pipe.denoiser
     #insert do_self_attention_guidance before call_params
-    call_params_index= pipe.denoising_functions.index(pipe.call_params)
+    call_params_index= find_index(pipe.denoising_functions,"call_params")
     pipe.denoising_functions.insert(call_params_index,partial(do_self_attention_guidance, pipe ))
     #add pred_x0 function
     pipe.pred_x0=partial(pred_x0,pipe)
@@ -30,7 +37,7 @@ def apply_SAG(pipe):
     #add sag_masking function
     pipe.sag_masking=partial(sag_masking,pipe)
     #add SAG_self_attention before compute_previous_noisy_sample in step functions
-    compute_previous_noisy_sample_index = pipe.denoising_step_functions.index(pipe.compute_previous_noisy_sample)
+    compute_previous_noisy_sample_index = find_index(pipe.denoising_step_functions,"compute_previous_noisy_sample")
     pipe.denoising_step_functions.insert(compute_previous_noisy_sample_index, partial(SAG_self_attention, pipe))
     #reverse
     def remover_SAG():
@@ -124,7 +131,7 @@ def SAG_self_attention(self, i, t, **kwargs):
             )
             uncond_emb, _ = prompt_embeds.chunk(2)
             # forward and give guidance
-            degraded_pred = self.unet(degraded_latents, t, encoder_hidden_states=uncond_emb).sample
+            degraded_pred = self.unet(degraded_latents, t, encoder_hidden_states=uncond_emb,added_cond_kwargs=kwargs.get('added_cond_kwargs')).sample
             noise_pred += sag_scale * (noise_pred_uncond - degraded_pred)
         else:
             # DDIM-like prediction of x0
@@ -136,7 +143,7 @@ def SAG_self_attention(self, i, t, **kwargs):
                 pred_x0, cond_attn, map_size, t, self.pred_epsilon(latents, noise_pred, t)
             )
             # forward and give guidance
-            degraded_pred = self.unet(degraded_latents, t, encoder_hidden_states=prompt_embeds).sample
+            degraded_pred = self.unet(degraded_latents, t, encoder_hidden_states=prompt_embeds,added_cond_kwargs=kwargs.get('added_cond_kwargs')).sample
             noise_pred += sag_scale * (noise_pred - degraded_pred)
     return kwargs
 
@@ -164,6 +171,7 @@ def sag_masking(self, original_latents, attn_map, map_size, t, eps):
     degraded_latents = gaussian_blur_2d(original_latents, kernel_size=9, sigma=1.0)
     degraded_latents = degraded_latents * attn_mask + original_latents * (1 - attn_mask)
     newt=t.view(1)
+    print(t,newt)
     # Noise it again to match the noise level
     degraded_latents = self.scheduler.add_noise(degraded_latents, noise=eps, timesteps=newt)
 
@@ -172,7 +180,6 @@ def sag_masking(self, original_latents, attn_map, map_size, t, eps):
 # Modified from diffusers.schedulers.scheduling_ddim.DDIMScheduler.step
 # Note: there are some schedulers that clip or do not return x_0 (PNDMScheduler, DDIMScheduler, etc.)
 def pred_x0(self, sample, model_output, timestep):
-
     # Move the tensor from GPU to CPU (if it's not already on CPU)
     numerical_value = int(timestep.tolist())
 

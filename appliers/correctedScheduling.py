@@ -11,10 +11,17 @@ from diffusers.utils import(
 import PIL
 import numpy as np
 from functools import partial
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_Correction(pipe):
     pipe.denoising_functions.insert(0, partial(Correction_default, pipe))
 
-    new_function_index = pipe.denoising_step_functions.index(pipe.compute_previous_noisy_sample)
+    new_function_index = find_index(pipe.denoising_step_functions,"compute_previous_noisy_sample")
     pipe.denoising_step_functions.insert(new_function_index, partial(correction, pipe))
     
 

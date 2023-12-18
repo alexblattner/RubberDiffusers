@@ -11,14 +11,21 @@ from diffusers.utils import(
 import PIL
 import numpy as np
 from functools import partial
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_dynamicThreasholding(pipe):
     #add defaults
     pipe.denoising_functions.insert(0, partial(dynamicThreasholding_default, pipe))
     #set the DynThresh instance
-    new_function_index = pipe.denoising_functions.index(pipe.prepare_timesteps)
+    new_function_index = find_index(pipe.denoising_functions,"prepare_timesteps")
     pipe.denoising_functions.insert((new_function_index+1), partial(dynamicThreasholding_setdtData, pipe))
     #replace the perform guidance function with a new one
-    new_step_function_index=pipe.denoising_step_functions.index(pipe.perform_guidance)
+    new_step_function_index=find_index(pipe.denoising_step_functions,"perform_guidance")
     pipe.dynamicThreasholding_stored_perform_guidance=pipe.perform_guidance
     pipe.perform_guidance=partial(perform_guidance,pipe)
     pipe.denoising_step_functions[new_step_function_index]=pipe.perform_guidance

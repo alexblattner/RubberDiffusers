@@ -19,6 +19,13 @@ import numpy as np
 from typing import Union
 from diffusers.image_processor import VaeImageProcessor
 from functools import partial
+def find_index(functions,name):
+    target_function_index = None
+    for index, func in enumerate(functions):
+        if (hasattr(func, "__name__") and func.__name__ == name) or (hasattr(func, "func") and hasattr(func.func, "__name__") and func.func.__name__ == name):
+            target_function_index = index
+            break
+    return target_function_index
 def apply_inpainting(pipe):
     #add mask processor
     pipe.mask_processor = VaeImageProcessor(
@@ -27,7 +34,7 @@ def apply_inpainting(pipe):
     #make default function responsible for having default values be the first function
     pipe.denoising_functions.insert(0, partial(inpainting_default, pipe))
     #insert inpainting_check_inputs before checker function
-    checker_index = pipe.denoising_functions.index(pipe.checker)
+    checker_index = find_index(pipe.denoising_functions,"checker")
     pipe.denoising_functions.insert(checker_index, partial(inpainting_check_inputs, pipe))
     #add prepare_mask_latents
     pipe.prepare_mask_latents=partial(prepare_mask_latents,pipe)
@@ -36,7 +43,7 @@ def apply_inpainting(pipe):
     #add _encode_vae_image
     pipe._encode_vae_image = partial(_encode_vae_image, pipe)
     #replace prepare_latent_var with new version
-    prepare_latent_var_index = pipe.denoising_functions.index(pipe.prepare_latent_var)
+    prepare_latent_var_index = find_index(pipe.denoising_functions,"prepare_latent_var")
     pipe.inpainting_stored_prepare_latent_var=pipe.prepare_latent_var
     pipe.prepare_latent_var = partial(prepare_latent_var, pipe)
     pipe.denoising_functions[prepare_latent_var_index]=pipe.prepare_latent_var
@@ -46,25 +53,36 @@ def apply_inpainting(pipe):
     #add get_timesteps
     pipe.get_timesteps=partial(get_timesteps, pipe)
     #replace prepare_timesteps with newer version
-    prepare_timesteps_index= pipe.denoising_functions.index(pipe.prepare_timesteps)
+    prepare_timesteps_index= find_index(pipe.denoising_functions,"prepare_timesteps")
     pipe.inpainting_stored_prepare_timesteps=pipe.prepare_timesteps
     pipe.prepare_timesteps=partial(prepare_timesteps, pipe)
     pipe.denoising_functions[prepare_timesteps_index]=pipe.prepare_timesteps
     #add prepare_mask_latent_variables function before the denoiser
-    denoiser_index= pipe.denoising_functions.index(pipe.denoiser)
+    denoiser_index= find_index(pipe.denoising_functions,"denoiser")
     pipe.denoising_functions.insert(denoiser_index, partial(prepare_mask_latent_variables,pipe))
 
     #replace expand_latents with newer version
-    expand_latents_index = pipe.denoising_step_functions.index(pipe.expand_latents)
+    expand_latents_index = find_index(pipe.denoising_step_functions,"expand_latents")
     pipe.inpainting_stored_expand_latents=pipe.expand_latents
     pipe.expand_latents=partial(expand_latents, pipe)
     pipe.denoising_step_functions[expand_latents_index]=pipe.expand_latents
+    
+    #replace scale_model_input with newer version
+    scale_model_input_index = find_index(pipe.denoising_step_functions,"scale_model_input")
+    pipe.inpainting_stored_scale_model_input=pipe.scale_model_input
+    pipe.scale_model_input=partial(scale_model_input, pipe)
+    pipe.denoising_step_functions[scale_model_input_index]=pipe.scale_model_input
     #add num_channel4_conditional as before last function
     pipe.denoising_step_functions.insert(len(pipe.denoising_step_functions) - 1, partial(num_channel4_conditional, pipe))
     #reverse
     def remover_inpainting():
         #remove num_channel4_conditional as before last function
         pipe.denoising_step_functions.pop(len(pipe.denoising_step_functions) - 2)
+
+        #undo replacement of scale_model_input with newer version
+        pipe.scale_model_input=pipe.inpainting_stored_scale_model_input
+        pipe.denoising_step_functions[scale_model_input_index]=pipe.scale_model_input
+        delattr(pipe, f"inpainting_stored_scale_model_input")
 
         #undo replacement of expand_latents with newer version
         pipe.expand_latents=pipe.inpainting_stored_expand_latents
@@ -246,7 +264,7 @@ def expand_latents(self, i, t, **kwargs):
     latent_model_input = torch.cat([kwargs.get('latents')] * 2) if kwargs.get('do_classifier_free_guidance') else kwargs.get('latents')
     kwargs['latent_model_input']=latent_model_input
     return kwargs
-def predict_noise_residual(self, i, t, **kwargs):
+def scale_model_input(self, i, t, **kwargs):
     latent_model_input=kwargs.get('latent_model_input')
     prompt_embeds=kwargs.get('prompt_embeds')
     cross_attention_kwargs=kwargs.get('cross_attention_kwargs')
@@ -255,13 +273,6 @@ def predict_noise_residual(self, i, t, **kwargs):
 
     if kwargs.get('num_channels_unet') == 9:
         latent_model_input = torch.cat([latent_model_input, kwargs.get('mask'), kwargs.get('masked_image_latents')], dim=1)
-    kwargs['noise_pred'] = self.unet(
-        latent_model_input,
-        t,
-        encoder_hidden_states=prompt_embeds,
-        cross_attention_kwargs=cross_attention_kwargs,
-        return_dict=False,
-    )[0]
     kwargs['latent_model_input']=latent_model_input
     return kwargs
 def num_channel4_conditional(self, i, t, **kwargs):
