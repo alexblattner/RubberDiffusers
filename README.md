@@ -1,6 +1,8 @@
 # RubberDiffusers
 This project aims to solve the rigidity problem that diffusers has. Instead of creating a pipeline for each variation and combination, you can just implement it for RubberDiffusers and the user will pick the variations he wants to enable or not. This is based on the base txt2img pipeline of diffusers.
 
+There's a special parameter in this pipeline called "stop_step". It's the exact step you want the denoising to stop at.
+
 # How to use
 1. install diffusers:
    pip install git+https://github.com/huggingface/diffusers
@@ -43,12 +45,19 @@ image=your_pipe("some guy on the beach",controlnet_image=[openpose_image,depth_i
 #image=your_pipe("some guy on the beach",controlnet_image=openpose_image,controlnet_conditioning_scale=0.5).images[0]
 ```
 Default values:
+
 guess_mode=False
+
 control_guidance_start=0.0
+
 control_guidance_end=1.0
+
 controlnet_conditioning_scale=1.0 for each controlnet
+
 Requirements:
+
 controlnet_image=single image or list of images
+
 loading the controlnets
 
 # apply_Correction
@@ -58,7 +67,79 @@ apply_Correction(your_pipe)
 image=your_pipe("a dog",guidance_rescale=0.5).images[0]
 ```
 Default values:
+
 guidance_rescale=0.0
+
+# apply_dynamicThreasholding
+this applies this: https://github.com/mcmonkeyprojects/sd-dynamic-thresholding
+```
+apply_dynamicThreasholding(pipe)
+image=pipe("some prompt",mimic_scale=20,guidance_scale=5).images[0]
+```
+Default values:
+
+mimic_scale=7.0
+
+threshold_percentile=1.00
+
+mimic_mode='Constant' #all possible values are: "Linear Down","Half Cosine Down","Cosine Down","Linear Up","Half Cosine Up","Cosine Up","Power Up","Power Down","Linear Repeating","Cosine Repeating","Sawtooth"
+
+mimic_scale_min=0.0
+
+cfg_mode='Constant' #all possible values are same as mimic_mode
+
+cfg_scale_min=0.0
+
+sched_val=4.0
+
+experiment_mode=0 #can also be 1,2 or 3, nothing else
+
+separate_feature_channels=True
+
+scaling_startpoint='MEAN' #can also be 'ZERO'
+
+variability_measure='AD' #can also be 'STD'
+
+interpolate_phi=1.0
+
+# apply_fabric
+It applies this: https://github.com/sd-fabric/fabric
+
+```
+buffer=open('img111.png', 'rb')
+buffer.seek(0)
+image_bytes = buffer.read()
+dimage = Image.open(BytesIO(image_bytes))
+buffer=open('img11.png', 'rb')
+buffer.seek(0)
+image_bytes = buffer.read()
+limage = Image.open(BytesIO(image_bytes))
+buffer=open('img8.png', 'rb')
+buffer.seek(0)
+image_bytes = buffer.read()
+limage2 = Image.open(BytesIO(image_bytes))
+apply_fabric(pipe)
+image=pipe("some prompt",liked_images=[limage,limage2],disliked_images=[dimage]).images[0]
+```
+Default values:
+
+liked_images=[]
+
+disliked_images=[]
+
+feedback_start_ratio=0.33
+
+feedback_end_ratio=0.66
+
+min_weight=0.1
+
+max_weight=1.0
+
+neg_scale=0.5
+
+pos_bottleneck_scale=1.0
+
+neg_bottleneck_scale=1.0
 
 # apply_img2img
 Assuming you apply nothing else, it will work exactly like in diffusers. In order to use img2img, you need to do the following:
@@ -72,9 +153,15 @@ image = Image.open(BytesIO(image_bytes)) #can be an array of images too. it will
 image=your_pipe("a handsome alien",image=image).images[0]
 ```
 Default values:
+
 strength=0.75
+
+skip_noise=False #whether to skip the added noise from the strength procedure. Useful to simulate an efficient hires fix implementation
+
 Requirements:
+
 image= an image or list of images
+
 
 # apply_inpainting
 Assuming you apply nothing else, it will work exactly like in diffusers. In order to use inpainting, you need to do the following:
@@ -92,9 +179,13 @@ mask_image = Image.open(BytesIO(image_bytes)) #can be an array of images too. it
 image=your_pipe("a handsome alien",image=image,mask_image=mask_image).images[0]
 ```
 Default values:
+
 strength=0.75
+
 Requirements:
+
 image= an image or list of images
+
 mask_image= an image or list of images
 
 # apply_promptFusion
@@ -113,8 +204,11 @@ prompt=[["a beautiful park, 4k",5],["volcano, cartoon",20]]
 image=pipe(prompt,num_inference_steps=20).images[0]
 ```
 Default values:
+
 same as the regular txt2img pipeline from diffusers
+
 Requirements:
+
 prompt= a list in a specific format
 
 # apply_SAG
@@ -124,8 +218,11 @@ apply_SAG(pipe)
 image=pipe("some prompt").images[0]
 ```
 Default values:
+
 sag_scale=0.75
+
 Requirements:
+
 prompt= a string or embedding
 
 # undo appliers
