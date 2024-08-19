@@ -202,6 +202,33 @@ apply_ipAdapter(pipe)
 prompt="a dog or something"
 img=Image.open('your_image.png').convert('RGB')
 image=pipe(prompt,num_inference_steps=20,ip_adapter_image=img).images[0]
+
+
+#if you want faceID instead
+#load ip adapter
+pipe.load_ip_adapter("ip-adapter-faceid-plusv2_sd15.bin",subfolder=None, weight_name="ip-adapter-faceid-plusv2_sd15.bin",image_encoder_folder=None)
+scale = 1
+pipe.set_ip_adapter_scale(scale)
+#get the faceids
+ref_images_embeds = []
+ip_adapter_images = []
+app = FaceAnalysis(name="buffalo_l",root='insightface', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+app.prepare(ctx_id=0, det_size=(640, 640))
+image = cv2.cvtColor(np.asarray(image), cv2.COLOR_BGR2RGB)
+faces = app.get(image)
+ip_adapter_images.append(face_align.norm_crop(image, landmark=faces[0].kps, image_size=224))
+image = torch.from_numpy(faces[0].normed_embedding)
+ref_images_embeds.append(image.unsqueeze(0))
+ref_images_embeds = torch.stack(ref_images_embeds, dim=0).unsqueeze(0)
+neg_ref_images_embeds = torch.zeros_like(ref_images_embeds)
+id_embeds = torch.cat([neg_ref_images_embeds, ref_images_embeds]).to(dtype=torch.float16, device="cuda")
+
+clip_embeds = pipe.prepare_ip_adapter_image_embeds( [ip_adapter_images], None, torch.device("cuda"), len(kwargs['generator']), True)[0]
+pipe.unet.encoder_hid_proj.image_projection_layers[0].clip_embeds = clip_embeds.to(dtype=torch.float16)
+pipe.unet.encoder_hid_proj.image_projection_layers[0].shortcut = True # True if Plus v2
+
+image=pipe(prompt,num_inference_steps=20,ip_adapter_image_embeds=[id_embeds]).images[0]
+
 ```
 Default values:
 
