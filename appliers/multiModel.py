@@ -114,7 +114,7 @@ def mask_prepare_multiModel(self,**kwargs):
 def set_other_pipes(self,**kwargs):
     for i in range(len(self.added_model)):
         model_kwargs=kwargs.get('model_kwargs')[i]
-        defaults=['prompt','num_inference_steps','guidance_scale','guidance_rescale','eta','return_dict','callback_steps','num_images_per_prompt','output_type','clip_skip','cross_attention_kwargs','dtype','device','nsfw','generator']
+        defaults=['prompt','num_inference_steps','guidance_scale','guidance_rescale','eta','return_dict','callback_steps','num_images_per_prompt','output_type','clip_skip','cross_attention_kwargs','dtype','device','nsfw','generator','height','width']
         for k in kwargs.keys():
             if k not in model_kwargs and k in defaults:
                 model_kwargs[k]=kwargs[k]
