@@ -22,7 +22,7 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer,CLIPVi
 import torchvision
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
+from diffusers.models import AutoencoderKL, UNet2DConditionModel,ImageProjection
 from diffusers.utils import deprecate, is_accelerate_available, is_accelerate_version, logging, replace_example_docstring,PIL_INTERPOLATION
 from diffusers.configuration_utils import FrozenDict
 from diffusers import StableDiffusionPipeline
@@ -74,7 +74,6 @@ def retrieve_timesteps(
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
 class StableDiffusionRubberPipeline(StableDiffusionPipeline):
-    revert_functions = []
 
     def __init__(
         self,
@@ -170,14 +169,81 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
         self.denoising_functions = [self.dimension, self.checker, self.determine_batch_size, self.call_params, self.encode_input,
-                                    self.prepare_timesteps, self.prepare_latent_var, self.prepare_extra_kwargs,self.guidance_scale_embedding, self.denoiser, self.postProcess]
-        self.denoising_step_functions = [self.expand_latents,self.scale_model_input, self.predict_noise_residual,
+                                    self.prepare_timesteps, self.prepare_latent_var, self.prepare_extra_kwargs,self.guidance_scale_embedding, self.denoiser, self.postProcess,self.returnImages]
+        self.denoising_step_functions = [self.lora_modify,self.expand_latents,self.scale_model_input,self.unet_kwargs, self.predict_noise_residual,
                                           self.perform_guidance, self.compute_previous_noisy_sample, self.call_callback]
+        self.revert_functions = []
         # The original functions were replaced with a bit different functions
         # self.denoising_step_functions = [
         #     self.latent_setter, self.predictor, self.step_performer, self.callbacker]
         self.after_init()
+    def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
+        dtype = next(self.image_encoder.parameters()).dtype
 
+        if not isinstance(image, torch.Tensor):
+            image = self.feature_extractor(image, return_tensors="pt").pixel_values
+
+        image = image.to(device=device, dtype=dtype)
+        if output_hidden_states:
+            image_enc_hidden_states = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
+            image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
+            uncond_image_enc_hidden_states = self.image_encoder(
+                torch.zeros_like(image), output_hidden_states=True
+            ).hidden_states[-2]
+            uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
+                num_images_per_prompt, dim=0
+            )
+            return image_enc_hidden_states, uncond_image_enc_hidden_states
+        else:
+            image_embeds = self.image_encoder(image).image_embeds
+            image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+            uncond_image_embeds = torch.zeros_like(image_embeds)
+
+            return image_embeds, uncond_image_embeds
+    def prepare_ip_adapter_image_embeds(
+        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt, do_classifier_free_guidance
+    ):
+        image_embeds = []
+        if do_classifier_free_guidance:
+            negative_image_embeds = []
+        if ip_adapter_image_embeds is None:
+            if not isinstance(ip_adapter_image, list):
+                ip_adapter_image = [ip_adapter_image]
+
+            if len(ip_adapter_image) != len(self.unet.encoder_hid_proj.image_projection_layers):
+                raise ValueError(
+                    f"`ip_adapter_image` must have same length as the number of IP Adapters. Got {len(ip_adapter_image)} images and {len(self.unet.encoder_hid_proj.image_projection_layers)} IP Adapters."
+                )
+
+            for single_ip_adapter_image, image_proj_layer in zip(
+                ip_adapter_image, self.unet.encoder_hid_proj.image_projection_layers
+            ):
+                output_hidden_state = not isinstance(image_proj_layer, ImageProjection)
+                single_image_embeds, single_negative_image_embeds = self.encode_image(
+                    single_ip_adapter_image, device, 1, output_hidden_state
+                )
+
+                image_embeds.append(single_image_embeds[None, :])
+                if do_classifier_free_guidance:
+                    negative_image_embeds.append(single_negative_image_embeds[None, :])
+        else:
+            for single_image_embeds in ip_adapter_image_embeds:
+                if do_classifier_free_guidance:
+                    single_negative_image_embeds, single_image_embeds = single_image_embeds.chunk(2)
+                    negative_image_embeds.append(single_negative_image_embeds)
+                image_embeds.append(single_image_embeds)
+
+        ip_adapter_image_embeds = []
+        for i, single_image_embeds in enumerate(image_embeds):
+            single_image_embeds = torch.cat([single_image_embeds] * num_images_per_prompt, dim=0)
+            if do_classifier_free_guidance:
+                single_negative_image_embeds = torch.cat([negative_image_embeds[i]] * num_images_per_prompt, dim=0)
+                single_image_embeds = torch.cat([single_negative_image_embeds, single_image_embeds], dim=0)
+
+            single_image_embeds = single_image_embeds.to(device=device)
+            ip_adapter_image_embeds.append(single_image_embeds)
+
+        return ip_adapter_image_embeds
     def before_init(self):
         return
 
@@ -212,11 +278,13 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         kwargs['output_type'] = output_type
         kwargs['clip_skip']=clip_skip
         kwargs['cross_attention_kwargs']=cross_attention_kwargs
-
+        kwargs['dtype']=self.unet.dtype
+        kwargs['device']=self.unet.device
+        kwargs['nsfw']=False
         for func in self.denoising_functions:
             kwargs = func(**kwargs)
         return kwargs
-
+    
     def dimension(self, **kwargs):
         height = kwargs.get('height') or self.unet.config.sample_size * self.vae_scale_factor
         width = kwargs.get('width') or self.unet.config.sample_size * self.vae_scale_factor
@@ -247,7 +315,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = kwargs.get('guidance_scale') > 1.0
-        
         return {'device': device, 'do_classifier_free_guidance': do_classifier_free_guidance, **kwargs}
 
     def encode_input(self, **kwargs):
@@ -263,6 +330,10 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         prompt_embeds = kwargs.get('prompt_embeds')
         negative_prompt_embeds = kwargs.get('negative_prompt_embeds')
         clip_skip=kwargs.get('clip_skip')
+        if prompt_embeds is not None:
+            prompt=None
+        if negative_prompt_embeds is not None:
+            negative_prompt=None
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
             device,
@@ -290,7 +361,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
 
     def prepare_latent_var(self, **kwargs):
         num_channels_latents = self.unet.config.in_channels
-        
         latents = self.prepare_latents(
             kwargs.get('batch_size') * kwargs.get('num_images_per_prompt'),
             num_channels_latents,
@@ -320,6 +390,11 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
         self._num_timesteps = len(kwargs.get('timesteps'))
         return kwargs
     
+    def lora_modify(self,i,t,**kwargs):
+        if kwargs.get('lora_changes') is not None:
+            if str(i) in kwargs.get('lora_changes'):
+                self.set_adapters(kwargs.get('lora_changes')[str(i)][0], kwargs.get('lora_changes')[str(i)][1])
+        return kwargs
     def expand_latents(self, i, t, **kwargs):
         latents = kwargs.get('latents')
         do_classifier_free_guidance = kwargs.get('do_classifier_free_guidance')
@@ -334,13 +409,19 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
     def scale_model_input(self,i,t,**kwargs):
         kwargs['latent_model_input'] = self.scheduler.scale_model_input(kwargs.get('latent_model_input'), t)
         return kwargs
-    def predict_noise_residual(self, i, t, **kwargs):
+    def unet_kwargs(self, i, t, **kwargs):
         prompt_embeds = kwargs.get('prompt_embeds')
         cross_attention_kwargs = kwargs.get('cross_attention_kwargs')
-        latent_model_input = kwargs.get('latent_model_input')
         added_cond_kwargs=kwargs.get('added_cond_kwargs')
-        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=prompt_embeds, timestep_cond=kwargs.get('timestep_cond'),
-                        cross_attention_kwargs=cross_attention_kwargs, added_cond_kwargs=added_cond_kwargs,return_dict=False)[0]
+        kwargs['unet_kwargs']={'encoder_hidden_states':prompt_embeds, 
+                               'timestep_cond':kwargs.get('timestep_cond'),
+                                'cross_attention_kwargs':cross_attention_kwargs, 
+                                'added_cond_kwargs':added_cond_kwargs,
+                                'return_dict':False}
+        return kwargs
+    def predict_noise_residual(self, i, t, **kwargs):
+        latent_model_input = kwargs.get('latent_model_input')
+        noise_pred = self.unet(latent_model_input, t,**kwargs.get('unet_kwargs'))[0]
         kwargs['noise_pred'] = noise_pred
         return kwargs
 
@@ -354,14 +435,14 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
             kwargs['noise_pred_text']=noise_pred_text
+        
         kwargs['noise_pred'] = noise_pred
         kwargs['noise_pred_uncond'] = noise_pred_uncond
         return kwargs
 
     def compute_previous_noisy_sample(self, i, t, **kwargs):
         latents = kwargs.get('latents')
-        noise_pred = kwargs.get('noise_pred')
-
+        noise_pred = kwargs['noise_pred']
         latents = self.scheduler.step(noise_pred, t, latents, **kwargs.get('extra_step_kwargs'), return_dict=False)[0]
         kwargs['latents'] = latents
         return kwargs
@@ -381,7 +462,6 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
     
     def denoiser(self, **kwargs):
         timesteps=kwargs.get('timesteps')
-
         with self.progress_bar(total=kwargs.get('num_inference_steps')) as progress_bar:
             for i, t in enumerate(timesteps):
                 if kwargs.get('stop_step') is not None and i == kwargs.get('stop_step'):
@@ -393,44 +473,39 @@ class StableDiffusionRubberPipeline(StableDiffusionPipeline):
                     (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
         return kwargs
-
+    
     def postProcess(self, **kwargs):
         output_type = kwargs.get("output_type")
         latents = kwargs.get("latents")
-        return_dict = True
-        device = self._execution_device
-        prompt_embeds = kwargs.get("prompt_embeds")
-        dtype=kwargs.get('dtype')
         if not output_type == "latent":
             image = self.vae.decode(
                 latents / self.vae.config.scaling_factor, return_dict=False)[0]
-            if not kwargs.get('nsfw'):
-                image, has_nsfw_concept = self.run_safety_checker(image, device, dtype)
-            else:
-                has_nsfw_concept=None
+            has_nsfw_concept=None
         else:
             image = latents
             has_nsfw_concept = None
-
+        has_nsfw_concept=None
         if has_nsfw_concept is None:
             do_denormalize = [True] * image.shape[0]
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+        kwargs['has_nsfw_concept']=None
 
-        image = self.image_processor.postprocess(
-            image, output_type=output_type, do_denormalize=do_denormalize)
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
-
-        if not return_dict:
-            return (image, has_nsfw_concept)
-
+        kwargs['image']=image
+        return kwargs
+    def returnImages(self,**kwargs):
+        image=kwargs.get('image')
+        has_nsfw_concept=kwargs.get('has_nsfw_concept')
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
     def revert(self):
         print("revert")
         for func in self.revert_functions:
             func()
+            print(func)
             del func
         self.revert_functions=[]

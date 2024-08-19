@@ -40,7 +40,7 @@ def apply_fabric(pipe):
     pipe.denoising_functions.insert(denoiser_index,partial(ref_idx_setter, pipe))
 
     #replace predict_noise_residual function with a new predict_noise_residual function
-    predict_noise_residual_index=find_index(pipe.denoising_functions,"predict_noise_residual")
+    predict_noise_residual_index=find_index(pipe.denoising_step_functions,"predict_noise_residual")
     pipe.fabric_stored_predict_noise_residual=pipe.predict_noise_residual
     pipe.predict_noise_residual=partial(predict_noise_residual,pipe)
     pipe.denoising_step_functions[predict_noise_residual_index]=pipe.predict_noise_residual
@@ -168,8 +168,7 @@ def unet_forward_with_cached_hidden_states(
         prompt_embd,
         cached_pos_hiddens: Optional[List[torch.Tensor]] = None,
         cached_neg_hiddens: Optional[List[torch.Tensor]] = None,
-        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        added_cond_kwargs: Optional[Dict[str, Any]] = None,
+        unet_kwargs: Optional[Dict[str, Any]] = None,
         pos_weights=(0.8, 0.8),
         neg_weights=(0.5, 0.5),
 ):
@@ -198,7 +197,7 @@ def unet_forward_with_cached_hidden_states(
                 attention_probs = module.old_get_attention_scores(query, key, attention_mask=None)
                 if weights is not None:
                     if weights.shape[0] != 1:
-                        weights = weights.repeat_interleave(attn.heads, dim=0)
+                        weights = weights.repeat_interleave(self.heads, dim=0)
                     attention_probs = attention_probs * weights[:, None]
                     attention_probs = attention_probs / attention_probs.sum(dim=-1, keepdim=True)
                 return attention_probs
@@ -207,8 +206,8 @@ def unet_forward_with_cached_hidden_states(
         return module.processor(module, hiddens, encoder_hidden_states=combined_hs, attention_mask=weights)
 
     if cached_pos_hiddens is None and cached_neg_hiddens is None:
-        return self.unet(z_all, t, encoder_hidden_states=prompt_embd, 
-                        cross_attention_kwargs=cross_attention_kwargs,added_cond_kwargs=added_cond_kwargs, return_dict=False)
+        unet_kwargs['encoder_hidden_states']=prompt_embd
+        return self.unet(z_all, t, **unet_kwargs)
     local_pos_weights = torch.linspace(*pos_weights, steps=len(self.unet.down_blocks) + 1)[:-1].tolist()
     local_neg_weights = torch.linspace(*neg_weights, steps=len(self.unet.down_blocks) + 1)[:-1].tolist()
     # Pre-calculate blocks and weights
@@ -228,7 +227,8 @@ def unet_forward_with_cached_hidden_states(
         
         module.attn1.old_forward = module.attn1.forward
         module.attn1.forward = new_forward.__get__(module.attn1)
-    out = self.unet(z_all, t, encoder_hidden_states=prompt_embd,added_cond_kwargs=added_cond_kwargs)
+    unet_kwargs['encoder_hidden_states']=prompt_embd
+    out = self.unet(z_all, t, **unet_kwargs)
 
     for module in all_modules:
         if hasattr(module.attn1, "old_forward"):
@@ -251,8 +251,9 @@ def predict_noise_residual(self,i, t, **kwargs):
     ref_end_idx=kwargs.get('ref_end_idx')
     positive_latents=kwargs.get('positive_latents')
     negative_latents=kwargs.get('negative_latents')
-    num_images=kwargs.get('num_images')
+    num_images=kwargs.get('num_images_per_prompt')
     cross_attention_kwargs = kwargs.get('cross_attention_kwargs')
+    unet_kwargs=kwargs.get('unet_kwargs')
     if i >= ref_start_idx and i <= ref_end_idx:
         weight = kwargs.get('max_weight')
     else:
@@ -268,7 +269,7 @@ def predict_noise_residual(self,i, t, **kwargs):
         ref_prompt_embd = torch.cat([kwargs.get('null_prompt_emb')] * (positive_latents.size(0) + negative_latents.size(0)), dim=0)
 
         cached_hidden_states = self.get_unet_hidden_states(
-            adjustor_tensor_noised, t, ref_prompt_embd,kwargs.get('added_cond_kwargs')
+            adjustor_tensor_noised, t, ref_prompt_embd,unet_kwargs
         )
 
         n_pos, n_neg = positive_latents.shape[0], negative_latents.shape[0]
@@ -290,7 +291,6 @@ def predict_noise_residual(self,i, t, **kwargs):
             cached_neg_hs = None
     else:
         cached_pos_hs, cached_neg_hs = None, None
-    
     kwargs['noise_pred'] = self.unet_forward_with_cached_hidden_states(
         latent_model_input,
         t,
@@ -299,11 +299,10 @@ def predict_noise_residual(self,i, t, **kwargs):
         cached_neg_hiddens=cached_neg_hs,
         pos_weights=pos_ws,
         neg_weights=neg_ws,
-        cross_attention_kwargs=cross_attention_kwargs,
-        added_cond_kwargs=kwargs.get('added_cond_kwargs'),
+        unet_kwargs=unet_kwargs
     )[0]
     return kwargs
-def get_unet_hidden_states(self, z_all, t, prompt_embd,added_cond_kwargs):
+def get_unet_hidden_states(self, z_all, t, prompt_embd,unet_kwargs):
         cached_hidden_states = []
         for module in self.unet.modules():
             if isinstance(module, BasicTransformerBlock):
@@ -314,9 +313,9 @@ def get_unet_hidden_states(self, z_all, t, prompt_embd,added_cond_kwargs):
 
                 module.attn1.old_forward = module.attn1.forward
                 module.attn1.forward = new_forward.__get__(module.attn1)
-
+        unet_kwargs['encoder_hidden_states']=prompt_embd
         # run forward pass to cache hidden states, output can be discarded
-        _ = self.unet(z_all, t, encoder_hidden_states=prompt_embd,added_cond_kwargs=added_cond_kwargs)
+        _ = self.unet(z_all, t, **unet_kwargs)
 
         # restore original forward pass
         for module in self.unet.modules():

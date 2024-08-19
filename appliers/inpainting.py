@@ -60,12 +60,6 @@ def apply_inpainting(pipe):
     #add prepare_mask_latent_variables function before the denoiser
     denoiser_index= find_index(pipe.denoising_functions,"denoiser")
     pipe.denoising_functions.insert(denoiser_index, partial(prepare_mask_latent_variables,pipe))
-
-    #replace expand_latents with newer version
-    expand_latents_index = find_index(pipe.denoising_step_functions,"expand_latents")
-    pipe.inpainting_stored_expand_latents=pipe.expand_latents
-    pipe.expand_latents=partial(expand_latents, pipe)
-    pipe.denoising_step_functions[expand_latents_index]=pipe.expand_latents
     
     #replace scale_model_input with newer version
     scale_model_input_index = find_index(pipe.denoising_step_functions,"scale_model_input")
@@ -83,11 +77,6 @@ def apply_inpainting(pipe):
         pipe.scale_model_input=pipe.inpainting_stored_scale_model_input
         pipe.denoising_step_functions[scale_model_input_index]=pipe.scale_model_input
         delattr(pipe, f"inpainting_stored_scale_model_input")
-
-        #undo replacement of expand_latents with newer version
-        pipe.expand_latents=pipe.inpainting_stored_expand_latents
-        pipe.denoising_step_functions[expand_latents_index]=pipe.expand_latents
-        delattr(pipe, f"inpainting_stored_expand_latents")
 
         #remove prepare_mask_latent_variables function before the denoiser
         pipe.denoising_functions.pop(denoiser_index)
@@ -258,11 +247,6 @@ def prepare_mask_latent_variables(self, **kwargs):
         )
     kwargs['mask']=mask
     kwargs['masked_image_latents']=masked_image_latents
-    return kwargs
-def expand_latents(self, i, t, **kwargs):
-    # expand the latents if we are doing classifier free guidance
-    latent_model_input = torch.cat([kwargs.get('latents')] * 2) if kwargs.get('do_classifier_free_guidance') else kwargs.get('latents')
-    kwargs['latent_model_input']=latent_model_input
     return kwargs
 def scale_model_input(self, i, t, **kwargs):
     latent_model_input=kwargs.get('latent_model_input')

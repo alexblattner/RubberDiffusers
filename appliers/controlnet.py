@@ -67,13 +67,13 @@ def apply_controlnet(pipe):
     denoiser_index = find_index(pipe.denoising_functions,"denoiser")
     pipe.denoising_functions.insert(denoiser_index, partial(controlnet_keep_set, pipe))
     
-    #replace predict_noise_residual function with a new predict_noise_residual function
-    predict_noise_residual_index=find_index(pipe.denoising_step_functions,"predict_noise_residual")
-    pipe.controlnet_stored_predict_noise_residual=pipe.predict_noise_residual
-    pipe.predict_noise_residual=partial(predict_noise_residual,pipe)
-    pipe.denoising_step_functions[predict_noise_residual_index]=pipe.predict_noise_residual
-    #add controlnet_denoising before predict_noise_residual function
-    pipe.denoising_step_functions.insert(predict_noise_residual_index,partial(controlnet_denoising,pipe))
+    #replace unet_kwargs function with a new unet_kwargs function
+    unet_kwargs_index= find_index(pipe.denoising_step_functions,"unet_kwargs")
+    pipe.inner_unet_kwargs_controlnet=pipe.unet_kwargs
+    pipe.unet_kwargs=partial(unet_kwargs, pipe)
+    pipe.denoising_step_functions[unet_kwargs_index]=pipe.unet_kwargs
+    #add controlnet_denoising before unet_kwargs function
+    # pipe.denoising_step_functions.insert(unet_kwargs_index,partial(controlnet_denoising,pipe))
     
     #add controlnet_offloading before postProcess
     new_function_index = find_index(pipe.denoising_functions,"postProcess")
@@ -83,13 +83,13 @@ def apply_controlnet(pipe):
         #remove controlnet_offloading before postProcess
         pipe.denoising_functions.pop(new_function_index)
 
-        #remove controlnet_denoising before predict_noise_residual function
-        pipe.denoising_step_functions.pop(predict_noise_residual_index)
+        #remove controlnet_denoising before unet_kwargs function
+        # pipe.denoising_step_functions.pop(unet_kwargs_index)
 
         #undo replacement of predict_noise_residual function with a new predict_noise_residual function
-        pipe.predict_noise_residual=pipe.controlnet_stored_predict_noise_residual
-        pipe.denoising_step_functions[predict_noise_residual_index]=pipe.predict_noise_residual
-        delattr(pipe, f"controlnet_stored_predict_noise_residual")
+        pipe.unet_kwargs=pipe.inner_unet_kwargs_controlnet
+        pipe.denoising_step_functions[unet_kwargs_index]=pipe.unet_kwargs
+        delattr(pipe, f"inner_unet_kwargs_controlnet")
 
         #remove controlnet_keep_set before denoiser function
         pipe.denoising_functions.pop(denoiser_index)
@@ -313,7 +313,6 @@ def controlnet_prepare_image(self,**kwargs):
     do_classifier_free_guidance=kwargs.get('do_classifier_free_guidance')
     guess_mode=kwargs.get('guess_mode')
     controlnet_image=kwargs.get('controlnet_image')
-
     if isinstance(controlnet, ControlNetModel):
         controlnet_image = self.prepare_controlnet_controlnet_image(
             image=controlnet_image,
@@ -401,7 +400,6 @@ def controlnet_denoising(self, i, t, **kwargs):
     do_classifier_free_guidance=kwargs.get('do_classifier_free_guidance')
     latents=kwargs.get('latents')
     prompt_embeds=kwargs.get('prompt_embeds')
-    latent_model_input=kwargs.get('latent_model_input')
     controlnet_conditioning_scale=kwargs.get('controlnet_conditioning_scale')
     controlnet_image=kwargs.get('controlnet_image')
     cond_scale=kwargs.get('cond_scale')
@@ -441,24 +439,53 @@ def controlnet_denoising(self, i, t, **kwargs):
     kwargs['down_block_res_samples']=down_block_res_samples
     kwargs['mid_block_res_sample']=mid_block_res_sample
     return kwargs
-def predict_noise_residual(self,i,t,**kwargs):
-    prompt_embeds = kwargs.get('prompt_embeds')
-    cross_attention_kwargs = kwargs.get('cross_attention_kwargs')
-    latent_model_input = kwargs.get('latent_model_input')
+def unet_kwargs(self, i, t, **kwargs):
     down_block_res_samples = kwargs.get('down_block_res_samples')
     mid_block_res_sample = kwargs.get('mid_block_res_sample')
-    added_cond_kwargs = kwargs.get('added_cond_kwargs')
-    noise_pred = self.unet(
-        latent_model_input,
+    guess_mode=kwargs.get('guess_mode')
+    do_classifier_free_guidance=kwargs.get('do_classifier_free_guidance')
+    latents=kwargs.get('latents')
+    prompt_embeds=kwargs.get('prompt_embeds')
+    controlnet_conditioning_scale=kwargs.get('controlnet_conditioning_scale')
+    controlnet_image=kwargs.get('controlnet_image')
+    cond_scale=kwargs.get('cond_scale')
+    controlnet_keep=kwargs.get('controlnet_keep')
+    latent_model_input = kwargs.get('latent_model_input')
+    if guess_mode and do_classifier_free_guidance:
+        # Infer ControlNet only for the conditional batch.
+        control_model_input = latents
+        control_model_input = self.scheduler.scale_model_input(control_model_input, t)
+        controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
+    else:
+        control_model_input = latent_model_input
+        controlnet_prompt_embeds = prompt_embeds
+    if isinstance(controlnet_keep[i], list):
+        cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
+    else:
+        controlnet_cond_scale = controlnet_conditioning_scale
+        if isinstance(controlnet_cond_scale, list):
+            controlnet_cond_scale = controlnet_cond_scale[0]
+        cond_scale = controlnet_cond_scale * controlnet_keep[i]
+    down_block_res_samples, mid_block_res_sample = self.controlnet(
+        control_model_input,
         t,
-        encoder_hidden_states=prompt_embeds,
-        cross_attention_kwargs=cross_attention_kwargs,
-        down_block_additional_residuals=down_block_res_samples,
-        mid_block_additional_residual=mid_block_res_sample,
-        added_cond_kwargs=added_cond_kwargs,
+        encoder_hidden_states=controlnet_prompt_embeds,
+        controlnet_cond=controlnet_image,
+        conditioning_scale=cond_scale,
+        guess_mode=guess_mode,
         return_dict=False,
-    )[0]
-    kwargs['noise_pred']=noise_pred
+    )
+    if guess_mode and do_classifier_free_guidance:
+        # Infered ControlNet only for the conditional batch.
+        # To apply the output of ControlNet to both the unconditional and conditional batches,
+        # add 0 to the unconditional batch to keep it unchanged.
+        down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+        mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
+    kwargs['down_block_res_samples']=down_block_res_samples
+    kwargs['mid_block_res_sample']=mid_block_res_sample
+    kwargs=self.inner_unet_kwargs_controlnet(i,t,**kwargs)
+    kwargs['unet_kwargs']['down_block_additional_residuals']=down_block_res_samples
+    kwargs['unet_kwargs']['mid_block_additional_residual']=mid_block_res_sample
     return kwargs
 def controlnet_offloading(self,**kwargs):
     if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:

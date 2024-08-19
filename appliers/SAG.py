@@ -116,6 +116,7 @@ def SAG_self_attention(self, i, t, **kwargs):
     map_size=kwargs.get('map_size')
     prompt_embeds=kwargs.get('prompt_embeds')
     sag_scale=kwargs.get('sag_scale')
+    unet_kwargs=kwargs.get('unet_kwargs')
     if do_self_attention_guidance:
         # classifier-free guidance produces two chunks of attention map
         # and we only use unconditional one according to equation (25)
@@ -131,7 +132,8 @@ def SAG_self_attention(self, i, t, **kwargs):
             )
             uncond_emb, _ = prompt_embeds.chunk(2)
             # forward and give guidance
-            degraded_pred = self.unet(degraded_latents, t, encoder_hidden_states=uncond_emb,added_cond_kwargs=kwargs.get('added_cond_kwargs')).sample
+            unet_kwargs['encoder_hidden_states']=uncond_emb
+            degraded_pred = self.unet(degraded_latents, t, **unet_kwargs).sample
             noise_pred += sag_scale * (noise_pred_uncond - degraded_pred)
         else:
             # DDIM-like prediction of x0
@@ -143,8 +145,9 @@ def SAG_self_attention(self, i, t, **kwargs):
                 pred_x0, cond_attn, map_size, t, self.pred_epsilon(latents, noise_pred, t)
             )
             # forward and give guidance
-            degraded_pred = self.unet(degraded_latents, t, encoder_hidden_states=prompt_embeds,added_cond_kwargs=kwargs.get('added_cond_kwargs')).sample
+            degraded_pred = self.unet(degraded_latents, t, **unet_kwargs).sample
             noise_pred += sag_scale * (noise_pred - degraded_pred)
+    kwargs['noise_pred']=noise_pred
     return kwargs
 
 
@@ -171,7 +174,6 @@ def sag_masking(self, original_latents, attn_map, map_size, t, eps):
     degraded_latents = gaussian_blur_2d(original_latents, kernel_size=9, sigma=1.0)
     degraded_latents = degraded_latents * attn_mask + original_latents * (1 - attn_mask)
     newt=t.view(1)
-    print(t,newt)
     # Noise it again to match the noise level
     degraded_latents = self.scheduler.add_noise(degraded_latents, noise=eps, timesteps=newt)
 

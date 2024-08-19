@@ -59,13 +59,16 @@ def encode_input(
     **kwargs,
 ):
     kwargs = self.inner_encode_input_ipAdapter(**kwargs)
-    if kwargs.get('ip_adapter_image') is not None:
-        output_hidden_state = False if isinstance(self.unet.encoder_hid_proj, ImageProjection) else True
-        image_embeds, negative_image_embeds = self.encode_image(kwargs.get('ip_adapter_image'), kwargs.get('device'), kwargs.get('num_images_per_prompt'),output_hidden_state)
-        if kwargs.get('do_classifier_free_guidance'):
-            kwargs['image_embeds'] = torch.cat([negative_image_embeds, image_embeds])
+    if kwargs.get('ip_adapter_image') is not None or kwargs.get('ip_adapter_image_embeds') is not None:
+        kwargs['image_embeds'] = self.prepare_ip_adapter_image_embeds(
+            kwargs.get('ip_adapter_image'),
+            kwargs.get('ip_adapter_image_embeds'),
+            kwargs.get('device'),
+            kwargs.get('batch_size') * kwargs.get('num_images_per_prompt'),
+            kwargs.get('do_classifier_free_guidance'),
+        )
     return kwargs
 
 def idAdapter_added_cond_kwargs(self,**kwargs):
-    kwargs['added_cond_kwargs'] = {"image_embeds": kwargs['image_embeds']} if kwargs.get('ip_adapter_image') is not None else None
+    kwargs['added_cond_kwargs'] = {"image_embeds": kwargs['image_embeds']} if (kwargs.get('ip_adapter_image') is not None or kwargs.get('ip_adapter_image_embeds') is not None) is not None else None
     return kwargs

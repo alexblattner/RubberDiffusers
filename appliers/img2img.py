@@ -17,6 +17,7 @@ import PIL
 import numpy as np
 from PIL import Image
 from functools import partial
+from typing import Any, Callable, Dict, List, Optional, Union
 def find_index(functions,name):
     target_function_index = None
     for index, func in enumerate(functions):
@@ -27,8 +28,12 @@ def find_index(functions,name):
 def apply_img2img(pipe):
     #insert defaults function
     pipe.denoising_functions.insert(0, partial(img2img_default, pipe))
-    #insert img2img_check_inputs before checker function
+
     checker_index = find_index(pipe.denoising_functions,"checker")
+    pipe.img2img_stored_checker=pipe.checker
+    pipe.checker=partial(checker,pipe)
+    pipe.denoising_functions[checker_index]=pipe.checker
+    #insert img2img_check_inputs before checker function
     pipe.denoising_functions.insert(checker_index, partial(img2img_check_inputs, pipe))
     #insert img2img_prepare_latents
     pipe.img2img_prepare_latents = partial(img2img_prepare_latents, pipe)
@@ -73,11 +78,45 @@ def apply_img2img(pipe):
         #remove img2img_check_inputs before checker function
         pipe.denoising_functions.pop(checker_index)
         delattr(pipe, f"img2img_prepare_latents")
-
+        pipe.checker=pipe.img2img_stored_checker
+        pipe.denoising_functions[checker_index]=pipe.checker
+        
+        delattr(pipe, f"img2img_stored_checker")
         #remove defaults function
         pipe.denoising_functions.pop(0)
 
     pipe.revert_functions.insert(0,remover_img2img)
+def checker(self,**kwargs):
+    if kwargs.get('strength') < 0 or kwargs.get('strength') > 1:
+        raise ValueError(f"The value of strength should in [0.0, 1.0] but is {kwargs.get('strength')}")
+
+    if kwargs.get('callback_steps') is not None and (not isinstance(kwargs.get('callback_steps'), int) or kwargs.get('callback_steps') <= 0):
+        raise ValueError(
+            f"`callback_steps` has to be a positive integer but is {kwargs.get('callback_steps')} of type"
+            f" {type(kwargs.get('callback_steps'))}."
+        )
+
+    if kwargs.get('callback_on_step_end_tensor_inputs') is not None and not all(
+        k in self._callback_tensor_inputs for k in kwargs.get('callback_on_step_end_tensor_inputs')
+    ):
+        raise ValueError(
+            f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in kwargs.get('callback_on_step_end_tensor_inputs') if k not in self._callback_tensor_inputs]}"
+        )
+    if kwargs.get('prompt') is None and kwargs.get('prompt_embeds') is None:
+        raise ValueError(
+            "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
+        )
+    elif kwargs.get('prompt') is not None and (not isinstance(kwargs.get('prompt'), str) and not isinstance(kwargs.get('prompt'), list)):
+        raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(kwargs.get('prompt'))}")
+
+    if kwargs.get('prompt_embeds') is not None and kwargs.get('negative_prompt_embeds') is not None:
+        if kwargs.get('prompt_embeds').shape != kwargs.get('negative_prompt_embeds').shape:
+            raise ValueError(
+                "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
+                f" got: `prompt_embeds` {kwargs.get('prompt_embeds').shape} != `negative_prompt_embeds`"
+                f" {kwargs.get('negative_prompt_embeds').shape}."
+            )
+    return kwargs
 def img2img_default(self,**kwargs):
     if kwargs.get('strength') is None:
         kwargs['strength']=0.75
@@ -137,58 +176,70 @@ def prepare_latent_var(self, **kwargs):
     )
     return {'num_channels_latents': num_channels_latents, 'latents': latents, **kwargs}
 def img2img_prepare_latents(self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None,skip_noise=False):
-        if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
+    if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
+        raise ValueError(
+            f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
+        )
+
+    image = image.to(device=device, dtype=dtype)
+
+    batch_size = batch_size * num_images_per_prompt
+
+    if image.shape[1] == 4:
+        init_latents = image
+
+    else:
+        if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
-                f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
-        image = image.to(device=device, dtype=dtype)
 
-        batch_size = batch_size * num_images_per_prompt
-
-        if image.shape[1] == 4:
-            init_latents = image
-
+        elif isinstance(generator, list):
+            init_latents = [
+                retrieve_latents(self.vae.encode(image), generator=generator[i])
+                for i in range(batch_size)
+            ]
+            init_latents = torch.cat(init_latents, dim=0)
         else:
-            if isinstance(generator, list) and len(generator) != batch_size:
-                raise ValueError(
-                    f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                    f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-                )
+            init_latents = retrieve_latents(self.vae.encode(image), generator=generator)
 
-            elif isinstance(generator, list):
-                init_latents = [
-                    self.vae.encode(image[i : i + 1]).latent_dist.sample(generator[i]) for i in range(batch_size)
-                ]
-                init_latents = torch.cat(init_latents, dim=0)
-            else:
-                init_latents = self.vae.encode(image).latent_dist.sample(generator)
+        init_latents = self.vae.config.scaling_factor * init_latents
+    if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
+        # expand init_latents for batch_size
+        deprecation_message = (
+            f"You have passed {batch_size} text prompts (`prompt`), but only {init_latents.shape[0]} initial"
+            " images (`image`). Initial images are now duplicating to match the number of text prompts. Note"
+            " that this behavior is deprecated and will be removed in a version 1.0.0. Please make sure to update"
+            " your script to pass as many initial images as text prompts to suppress this warning."
+        )
+        deprecate("len(prompt) != len(image)", "1.0.0", deprecation_message, standard_warn=False)
+        additional_image_per_prompt = batch_size // init_latents.shape[0]
+        init_latents = torch.cat([init_latents] * additional_image_per_prompt, dim=0)
+    elif batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] != 0:
+        raise ValueError(
+            f"Cannot duplicate `image` of batch size {init_latents.shape[0]} to {batch_size} text prompts."
+        )
+    else:
+        init_latents = torch.cat([init_latents], dim=0)
 
-            init_latents = self.vae.config.scaling_factor * init_latents
+    shape = init_latents.shape
+    noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
 
-        if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
-            # expand init_latents for batch_size
-            deprecation_message = (
-                f"You have passed {batch_size} text prompts (`prompt`), but only {init_latents.shape[0]} initial"
-                " images (`image`). Initial images are now duplicating to match the number of text prompts. Note"
-                " that this behavior is deprecated and will be removed in a version 1.0.0. Please make sure to update"
-                " your script to pass as many initial images as text prompts to suppress this warning."
-            )
-            deprecate("len(prompt) != len(image)", "1.0.0", deprecation_message, standard_warn=False)
-            additional_image_per_prompt = batch_size // init_latents.shape[0]
-            init_latents = torch.cat([init_latents] * additional_image_per_prompt, dim=0)
-        elif batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] != 0:
-            raise ValueError(
-                f"Cannot duplicate `image` of batch size {init_latents.shape[0]} to {batch_size} text prompts."
-            )
-        else:
-            init_latents = torch.cat([init_latents], dim=0)
+    # get latents
+    init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
+    latents = init_latents
 
-        shape = init_latents.shape
-        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+    return latents
 
-        # get latents
-        if not skip_noise:
-            init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
-        latents = init_latents
-
-        return latents
+def retrieve_latents(
+    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
+):
+    if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
+        return encoder_output.latent_dist.sample(generator)
+    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
+        return encoder_output.latent_dist.mode()
+    elif hasattr(encoder_output, "latents"):
+        return encoder_output.latents
+    else:
+        raise AttributeError("Could not access latents of provided encoder_output")

@@ -18,10 +18,7 @@ import torchvision
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
-from diffusers.pipelines.controlnet.pipeline_controlnet import StableDiffusionControlNetPipeline
 from diffusers.image_processor import VaeImageProcessor
-from diffusers.models.controlnet import ControlNetModel
 from functools import partial
 def find_index(functions,name):
     target_function_index = None
@@ -30,7 +27,7 @@ def find_index(functions,name):
             target_function_index = index
             break
     return target_function_index
-def apply_multiDiffusion(pipe):
+def apply_multiDiffusion2(pipe):
     determine_batch_size_index= find_index(pipe.denoising_functions,"determine_batch_size")
     pipe.inner_determine_batch_size_multiDiffusion=pipe.determine_batch_size
     pipe.determine_batch_size=partial(determine_batch_size, pipe)
@@ -50,7 +47,9 @@ def apply_multiDiffusion(pipe):
     pipe.multiDiffusionFunctions=[]
     si=find_index(pipe.denoising_step_functions,"unet_kwargs")
     ei=find_index(pipe.denoising_step_functions,"compute_previous_noisy_sample")
+    print("count: ",ei-si)
     for i in range(ei-si):
+        print(i)
         pipe.multiDiffusionFunctions.append(pipe.denoising_step_functions.pop(si))
     pipe.inner_unet_kwargs_multiDiffusion=pipe.unet_kwargs
     pipe.unet_kwargs=partial(unet_kwargs,pipe)
@@ -108,15 +107,17 @@ def encode_input(self, **kwargs):
     kwargs['negative_prompt_embeds']=negative_prompt_embedsArr
     return kwargs
 def mask_prepare_multiDiffusion(self,**kwargs):
-    def create_rectangular_mask(height, width, y_start, x_start, block_height, block_width, device='cpu'):
+    def create_rectangular_mask(height, width, y_start, x_start, block_height, block_width, strength, device='cpu'):
             mask = torch.zeros(height, width, device=device)
-            mask[y_start:y_start + block_height, x_start:x_start + block_width] = 1
+            mask[y_start:y_start + block_height, x_start:x_start + block_width] = strength
             return mask
     
     mask_list = []
     dtype=kwargs.get('dtype')
-    plen= len(kwargs['prompt']) if kwargs['prompt'] is not None  else len(kwargs['prompt_embeds'])
-    pos=kwargs['pos']
+    pos=kwargs['multi_diffusion_pos']
+    height=kwargs['height']
+    width=kwargs['width']
+    plen= len(kwargs['multi_diffusion_pos']) if kwargs['multi_diffusion_pos'] is not None  else len(kwargs['multi_diffusion_pos'])
     for i in range(plen):
         one_filter = None
         if isinstance(pos[i], str):
@@ -127,7 +128,7 @@ def mask_prepare_multiDiffusion(self,**kwargs):
             block_width = abs(int(pos_start[0]) - int(pos_end[0])) // 8
             y_start = int(pos_start[1]) // 8
             x_start = int(pos_start[0]) // 8
-            one_filter = create_rectangular_mask(kwargs['height'] // 8, kwargs['width'] // 8, y_start, x_start, block_height, block_width, device=kwargs['device'])
+            one_filter = create_rectangular_mask(kwargs['height'] // 8, kwargs['width'] // 8, y_start, x_start, block_height, block_width,kwargs['multi_diffusion_mask_strengths'][i], device=kwargs['device'])
             # one_filter=one_filter.unsqueeze(0).expand(batch_size, 4, -1, -1).to(torch.float16)
         else:
             img = pos[i].convert('L').resize((kwargs['width'] // 8, kwargs['height'] // 8))
@@ -138,58 +139,46 @@ def mask_prepare_multiDiffusion(self,**kwargs):
             # Normalize the data to range between 0 and 1
             np_data = np_data / 255
 
-            # np_data = (np_data > 0.5).astype(np.float32)
+            np_data = (np_data > 0.5).astype(np.float32)
             # Convert the numpy array to a PyTorch tensor
             mask = torch.from_numpy(np_data)
 
             # Convert the numpy array to a PyTorch tensor
             one_filter = mask.to('cuda')
-            # one_filter = one_filter.unsqueeze(0)
-            # one_filter = one_filter.unsqueeze(0).expand(batch_size, 4, -1, -1).to(torch.float16)
+            one_filter *=kwargs['multi_diffusion_mask_strengths'][i]
         if dtype:
             one_filter=one_filter.to(dtype)
         mask_list.append(one_filter)
 
+    base_mask = torch.zeros(height//8, width//8, device=kwargs['device'])
+    if dtype:
+        base_mask=base_mask.to(dtype)
     # For each pixel
     for x in range(kwargs['height']//8):
         for y in range(kwargs['width']//8):
             # Get the indices of the masks that are applied to this pixel
             applied_mask_indices = [idx for idx, mask in enumerate(mask_list) if mask[x, y] > 0]
-
-            if applied_mask_indices:
-                mask_strengths = [kwargs['mask_z_index'][idx] for idx in applied_mask_indices]
-                # Calculate the weights for the applied masks
-                totalM=0
-                multi=len(mask_strengths)>2
-                pxvals=dict()
-                for i in applied_mask_indices:
-                    val=mask_list[i][x, y].item()
-                    val=val*kwargs['mask_z_index'][i]
-                    pxvals[i]=val
-                    totalM+=val
-                total_weights=0
-                for i in applied_mask_indices:
-                    w=(pxvals[i]/totalM)
-                    mask_list[i][x, y] *= w
-                    total_weights+=w
-                if total_weights>1:
-                    mask_list[applied_mask_indices[0]][x, y] -= total_weights-1
-                elif total_weights<1:
-                    mask_list[applied_mask_indices[0]][x, y] += 1-total_weights
-            else:
-                raise ValueError(
-                        "unoccupied pixel in the mask. {x}, {y}"
-                    )
-    # for i in range(len(mask_list)):
-    #     mask_list[i] = mask_list[i].unsqueeze(0).expand(kwargs['batch_size'], 4, -1, -1).to(torch.float16)
-    #     torchvision.transforms.functional.to_pil_image(mask_list[i][0]*256).save(str(i)+".png")
-    kwargs['mask_list']=mask_list
+            if len(applied_mask_indices)==0:
+                base_mask[x, y] = 1
+            elif len(applied_mask_indices)>0:
+                value=0
+                #count the value in that pixel
+                for i in range(len(applied_mask_indices)):
+                    value += mask_list[applied_mask_indices[i]][x, y]
+                base_mask[x, y] = 1-value
+    mask_list.insert(0,base_mask)
+    kwargs['multi_diffusion_mask_list']=mask_list
     return kwargs
 def unet_kwargs(self, i, t, **kwargs):
-    mask_list=kwargs['mask_list']
+    mask_list=kwargs['multi_diffusion_mask_list']
     count=0
     result=None
     for j in mask_list:
+        activation_function=kwargs.get('multiDiffusion_activation_functions')
+        if activation_function is not None:
+            activation_function=activation_function[count]
+            if activation_function is not None:
+                kwargs=activation_function(self,i,t,**kwargs)
         pe=kwargs['prompt_embeds']
         ne=kwargs['negative_prompt_embeds']
         kwargs['prompt_embeds']=kwargs['prompt_embeds'][count]
@@ -203,6 +192,11 @@ def unet_kwargs(self, i, t, **kwargs):
             result += kwargs['noise_pred'] * mask_list[count]
         else:
             result = kwargs['noise_pred'] * mask_list[count]
+        removal_function=kwargs.get('multiDiffusion_removal_functions')
+        if removal_function is not None:
+            removal_function=removal_function[count]
+            if removal_function is not None:
+                kwargs=removal_function(self,i,t,**kwargs)
         count+=1
         kwargs['prompt_embeds']=pe
         kwargs['negative_prompt_embeds']=ne
