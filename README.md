@@ -262,6 +262,19 @@ pos= a list of strings in the format (x1:y1-x2:y2 those values are in pixels and
 
 mask_z_index= a list of ints that must be the same length as prompt/prompt_embeds
 
+# apply_multiModel
+This will let you use multiple models at once and specify where and at what strength do you want each to be used:
+Usage:
+```
+load multiple pipes such that you have a base model pipe and additional model (could be any amount of models you want) pipe2
+apply_multiModel(pipe)
+pipe.added_model=[pipe2]
+image=pipe("your prompt",model_kwargs=[{prompt="your prompt for the first loaded model"}]).images[0]
+```
+Requirements:
+added_model= array of models to use (must be loaded with Rubber diffusers)
+model_kwargs= an array of dictionaries that will be the inputs for each model in added_model
+
 # apply_promptFusion
 This will give you the ability to change prompt mid generation. The result is something like in here: https://github.com/ljleb/prompt-fusion-extension. My syntax is different though.
 Syntax:
@@ -313,6 +326,7 @@ adapters = MultiAdapter(
 )
 adapters = adapters.to(torch.float16)
 t2i_image=[image1,image2]
+apply_t2iAdapter(pipe)
 image=pipe("some prompt",adapter=adapters,adapter_conditioning_scale=[1,1],t2i_image=t2i_image).images[0]
 ```
 Default values:
