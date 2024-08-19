@@ -319,10 +319,15 @@ image=pipe(prompt=["your prompt","your second prompt],width=512,height=512,pos=[
 ```
 Requirements:
 prompt=an array of prompts to use
+
 OR
+
 prompt_embeds= an array of prompts embeddings to use
+
 pos=where to apply the strength of the prompt (first pos is the position of the second prompt), the format is either a black and white mask or x0:y0-x1-y1 in pixels that are divisible by 8. MUST BE SAME LENGTH AS prompt/prompt_embeds
+
 mask_strengths= value between 0 and 1 that decide how much strength should be applied in the respective pos. if there are spots that have a value below 1, they will be adjusted such that the first prompt will work there. MUST BE SAME LENGTH AS prompt/prompt_embeds
+
 
 # apply_multiModel
 This will let you use multiple models at once and specify where and at what strength do you want each to be used:
@@ -335,9 +340,13 @@ image=pipe("your prompt",width=512,height=512,pos=["0:0-512:512"],mask_strengths
 ```
 Requirements:
 added_model= array of models to use (must be loaded with Rubber diffusers)
+
 model_kwargs= an array of dictionaries that will be the inputs for each model in added_model. MUST BE SAME LENGTH AS added_model
+
 pos=where to apply the strength of the model (first pos is the position of first model in added_model), the format is either a black and white mask or x0:y0-x1-y1 in pixels that are divisible by 8. MUST BE SAME LENGTH AS added_model
+
 mask_strengths= value between 0 and 1 that decide how much strength should be applied in the respective pos. if there are spots that have a value below 1, they will be adjusted such that the first pipeline will work there. MUST BE SAME LENGTH AS added_model
+
 
 # apply_promptFusion
 This will give you the ability to change prompt mid generation. The result is something like in here: https://github.com/ljleb/prompt-fusion-extension. My syntax is different though.
@@ -397,7 +406,9 @@ Default values:
 adapter_conditioning_scale=[1.0]
 
 Requirements:
+
 adapters= the T2i adapter you want
+
 t2i_image= the image or images to use
 
 # undo appliers
