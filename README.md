@@ -238,6 +238,54 @@ Requirements:
 
 use load_ip_adapter first and use ip_adapter_image
 
+# apply_midIpAdapter
+Not necessarily for ip adapter only. This gives you the option to apply a function mid usage of denoising
+Usage:
+```
+ref_images_embeds = []
+ip_adapter_images = []
+app = FaceAnalysis(name="buffalo_l",root='insightface', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+app.prepare(ctx_id=0, det_size=(640, 640))
+image = cv2.cvtColor(np.asarray(image), cv2.COLOR_BGR2RGB)
+faces = app.get(image)
+ip_adapter_images.append(face_align.norm_crop(image, landmark=faces[0].kps, image_size=224))
+image = torch.from_numpy(faces[0].normed_embedding)
+ref_images_embeds.append(image.unsqueeze(0))
+ref_images_embeds = torch.stack(ref_images_embeds, dim=0).unsqueeze(0)
+neg_ref_images_embeds = torch.zeros_like(ref_images_embeds)
+id_embeds = torch.cat([neg_ref_images_embeds, ref_images_embeds]).to(dtype=torch.float16, device="cuda")
+
+pipe.load_lora_weights("ip-adapter-faceid-plusv2_sd15_lora.safetensors", adapter_name="ip-adapter-faceid-plusv2")
+pipe.set_adapters("ip-adapter-faceid-plusv2",[0])
+
+def activation_function(pipe,**kwargs):
+    pipe.load_ip_adapter("ip-adapter-faceid-plusv2_sd15.bin",subfolder=None, weight_name="ip-adapter-faceid-plusv2_sd15.bin",image_encoder_folder=None)
+    scale = 1
+    pipe.set_ip_adapter_scale(scale)
+    clip_embeds = pipe.prepare_ip_adapter_image_embeds( [ip_adapter_images], None, torch.device("cuda"), len(kwargs['generator']), True)[0]
+    pipe.set_adapters("ip-adapter-faceid-plusv2",[0.25])
+
+    pipe.unet.encoder_hid_proj.image_projection_layers[0].clip_embeds = clip_embeds.to(dtype=torch.float16)
+    pipe.unet.encoder_hid_proj.image_projection_layers[0].shortcut = True # True if Plus v2
+    kwargs['image_embeds'] = pipe.prepare_ip_adapter_image_embeds(
+        kwargs.get('ip_adapter_image'),
+        kwargs.get('ip_adapter_image_embeds'),
+        kwargs.get('device'),
+        kwargs.get('batch_size') * kwargs.get('num_images_per_prompt'),
+        kwargs.get('do_classifier_free_guidance'),
+    )
+    kwargs['added_cond_kwargs'] = {"image_embeds": kwargs['image_embeds']} if (kwargs.get('ip_adapter_image') is not None or kwargs.get('ip_adapter_image_embeds') is not None) is not None else None
+    return kwargs
+def removal_function(pipe,**kwargs):    
+    pipe.unload_ip_adapter()
+    pipe.image_encoder=image_encoder
+    if kwargs.get('added_cond_kwargs'):
+        del kwargs['added_cond_kwargs']
+    return kwargs
+
+image=pipe("your prompt",ip_start=5,ip_end=20).images[0]
+```
+
 # apply_multiDiffusion
 This will let you apply prompts regionally simultaneously. To use with promptFusion, you must apply promptFusion after it (Example: [[["a beautiful night in the park, high quality","mona lisa, high quality","moon"],4],[["a beautiful day in the park, high quality","mona lisa, high quality","sun"],28]]).
 Usage:
