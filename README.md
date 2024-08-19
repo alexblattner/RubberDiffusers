@@ -299,6 +299,29 @@ Requirements:
 
 prompt= a string or embedding
 
+# apply_t2iAdapter
+
+Usage:
+```
+from diffusers import StableDiffusionAdapterPipeline, MultiAdapter, T2IAdapter
+
+adapters = MultiAdapter(
+    [
+        T2IAdapter.from_pretrained("TencentARC/t2iadapter_keypose_sd14v1"),
+        T2IAdapter.from_pretrained("TencentARC/t2iadapter_depth_sd14v1"),
+    ]
+)
+adapters = adapters.to(torch.float16)
+t2i_image=[image1,image2]
+image=pipe("some prompt",adapter=adapters,adapter_conditioning_scale=[1,1],t2i_image=t2i_image).images[0]
+```
+Default values:
+adapter_conditioning_scale=[1.0]
+
+Requirements:
+adapters= the T2i adapter you want
+t2i_image= the image or images to use
+
 # undo appliers
 Assuming you'd like to use the same pipeline with different functionalities, you can do something like this:
 ```
